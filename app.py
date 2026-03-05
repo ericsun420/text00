@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 6.2 究極防彈裝甲版｜降維防護｜去重清洗｜Apple Pro
+# app.py — 起漲戰情室｜戰神 6.3 釩合金裝甲版｜數據閉環｜動態 Ticker 救援｜Apple Pro
 import io
 import math
 import time
@@ -59,7 +59,7 @@ def yf_download_daily(syms):
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="WarRoom Pro 6.2", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro 6.3", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
@@ -181,14 +181,14 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                         "low":  float(q.get("l") if q.get("l") not in (None,"","-","—") else last),
                         "best_bid": bp[0] if bp else 0.0, "bid_sh1": bv[0] if bv else 0.0
                     })
-                    mis_diag["mis_rows"] += 1
             except: mis_diag["mis_parse_fail"] += 1
         time.sleep(0.12 if not is_test else 0.01)
 
-    # ✅ ✅ ✅ 修正 3：去重清洗，留下最強勢的一筆
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.sort_values(["dist", "vol_sh"], ascending=[True, False]).drop_duplicates("code", keep="first")
+    # ✅ 修正 1：同步去重後的真實數量，保證數據閉環
+    mis_diag["mis_rows"] = len(df)
     return df, err_mis, mis_diag
 
 def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloodline):
@@ -221,10 +221,15 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         frames = [f for f in frames if f is not None and not getattr(f, "empty", False)]
         if frames: 
             raw_daily = pd.concat(frames, axis=1)
-            # ✅ ✅ ✅ 修正 1：終極降維防護，強制恢復 MultiIndex
+            # ✅ 修正 2：更保守的動態 Ticker 降維防護
             if raw_daily is not None and not isinstance(raw_daily.columns, pd.MultiIndex):
-                raw_daily.columns = pd.MultiIndex.from_product([[syms[0]], raw_daily.columns])
-            
+                fallback_t = syms[0]
+                try:
+                    if frames and isinstance(frames[0].columns, pd.MultiIndex):
+                        fallback_t = frames[0].columns.get_level_values(0)[0]
+                except: pass
+                raw_daily.columns = pd.MultiIndex.from_product([[fallback_t], raw_daily.columns])
+                
             if isinstance(raw_daily.columns, pd.MultiIndex):
                 raw_daily = raw_daily.loc[:, ~raw_daily.columns.duplicated()]
             raw_daily = raw_daily[~raw_daily.index.duplicated(keep="last")]
@@ -293,12 +298,12 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 6.2</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">WarRoom Pro 6.3</div>', unsafe_allow_html=True)
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 血統證明", value=True)
 
-if st.button("🚀 啟動工業級掃描"):
+if st.button("🚀 啟動全市場秒級掃描"):
     t0, diag = time.perf_counter(), diag_init()
     with st.status("⚡ 核心運作中...", expanded=True) as status:
         t = time.perf_counter(); meta = get_stock_list()
@@ -331,7 +336,6 @@ if scan:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("全市場", d.get("meta_count")); c2.metric("MIS 有效", d.get("mis_parse_ok"))
         c3.metric("YF 失敗", d.get("yf_fail"))
-        # ✅ ✅ ✅ 修正 2：救援模式與未知錯誤合併顯示
         c4.metric("救援 / 未知錯誤", f"{'🟢 ON' if d.get('yf_rescue_used', 0) else '⚪ OFF'} | ERR {d.get('other_err',0)}")
         
         st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
