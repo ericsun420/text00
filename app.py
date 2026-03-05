@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 6.1 究極無漏版｜缺欄防護｜救援狀態可視化｜Apple Pro
+# app.py — 起漲戰情室｜戰神 6.2 究極防彈裝甲版｜降維防護｜去重清洗｜Apple Pro
 import io
 import math
 import time
@@ -23,7 +23,7 @@ def diag_init():
         "meta_count": 0, "cand_total": 0, "mis_req_err": 0,
         "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0,
         "yf_symbols": 0, "yf_fail": 0, "other_err": 0,
-        "yf_bulk_fail": 0, "yf_rescue_used": 0, # ✅ 新增：救援狀態追蹤
+        "yf_bulk_fail": 0, "yf_rescue_used": 0,
         "last_errors": deque(maxlen=5),
         "t_meta": 0.0, "t_mis": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0
     }
@@ -59,7 +59,7 @@ def yf_download_daily(syms):
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="WarRoom Pro 6.1", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro 6.2", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
@@ -184,7 +184,12 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                     mis_diag["mis_rows"] += 1
             except: mis_diag["mis_parse_fail"] += 1
         time.sleep(0.12 if not is_test else 0.01)
-    return pd.DataFrame(rows), err_mis, mis_diag
+
+    # ✅ ✅ ✅ 修正 3：去重清洗，留下最強勢的一筆
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df = df.sort_values(["dist", "vol_sh"], ascending=[True, False]).drop_duplicates("code", keep="first")
+    return df, err_mis, mis_diag
 
 def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloodline):
     stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "非連板標的": []}
@@ -202,7 +207,6 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         raw_daily = yf_download_daily(syms)
     except Exception as e:
         diag_err(diag, e, "YF_BULK_FAIL")
-        # ✅ 新增：標記救援啟動
         diag["yf_bulk_fail"] = diag.get("yf_bulk_fail", 0) + 1
         diag["yf_rescue_used"] = 1
         
@@ -217,6 +221,10 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         frames = [f for f in frames if f is not None and not getattr(f, "empty", False)]
         if frames: 
             raw_daily = pd.concat(frames, axis=1)
+            # ✅ ✅ ✅ 修正 1：終極降維防護，強制恢復 MultiIndex
+            if raw_daily is not None and not isinstance(raw_daily.columns, pd.MultiIndex):
+                raw_daily.columns = pd.MultiIndex.from_product([[syms[0]], raw_daily.columns])
+            
             if isinstance(raw_daily.columns, pd.MultiIndex):
                 raw_daily = raw_daily.loc[:, ~raw_daily.columns.duplicated()]
             raw_daily = raw_daily[~raw_daily.index.duplicated(keep="last")]
@@ -240,15 +248,12 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                 if sym not in raw_daily.columns.get_level_values(0):
                     yf_diag["yf_fail"] += 1; continue
                 df_sym = raw_daily[sym]
-            else: 
-                df_sym = raw_daily
+            else: df_sym = raw_daily
             
-            # ✅ 新增：嚴格檢查所需欄位是否存在，避免 KeyError 污染 other_err
             if not {"Close", "Volume"}.issubset(set(df_sym.columns)):
                 yf_diag["yf_fail"] += 1; continue
                 
             dfD = df_sym[["Close", "Volume"]].dropna()
-                
             if len(dfD) < 30: yf_diag["yf_fail"] += 1; continue
             
             dates_tw = idx_date_taipei(dfD.index)
@@ -256,7 +261,6 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             if len(past_df) < 30: yf_diag["yf_fail"] += 1; continue
             
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
-            
             if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0:
                 yf_diag["yf_fail"] += 1; continue
 
@@ -289,7 +293,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 6.1</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">WarRoom Pro 6.2</div>', unsafe_allow_html=True)
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 血統證明", value=True)
@@ -327,8 +331,8 @@ if scan:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("全市場", d.get("meta_count")); c2.metric("MIS 有效", d.get("mis_parse_ok"))
         c3.metric("YF 失敗", d.get("yf_fail"))
-        # ✅ 新增：把 other_err 替換成更直觀的救援狀態燈號
-        c4.metric("救援模式", "🟢 ON" if d.get("yf_rescue_used", 0) else "⚪ OFF")
+        # ✅ ✅ ✅ 修正 2：救援模式與未知錯誤合併顯示
+        c4.metric("救援 / 未知錯誤", f"{'🟢 ON' if d.get('yf_rescue_used', 0) else '⚪ OFF'} | ERR {d.get('other_err',0)}")
         
         st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
         if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
