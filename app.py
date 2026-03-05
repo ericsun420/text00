@@ -7,7 +7,7 @@ import requests
 import urllib3
 import pandas as pd
 import yfinance as yf
-import streamlit as st
+import streamlit.components.v1 as components
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -493,11 +493,16 @@ def render_pretty_table(df: pd.DataFrame) -> None:
         return
 
     def f2(x):
-        try: return f"{float(x):,.2f}"
-        except: return str(x)
+        try:
+            return f"{float(x):,.2f}"
+        except Exception:
+            return str(x)
+
     def f0(x):
-        try: return f"{int(float(x)):,}"
-        except: return str(x)
+        try:
+            return f"{int(float(x)):,}"
+        except Exception:
+            return str(x)
 
     rows = []
     for _, r in df.iterrows():
@@ -516,29 +521,94 @@ def render_pretty_table(df: pd.DataFrame) -> None:
         </tr>
         """)
 
-    st.markdown(f"""
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th class="center">#</th>
-            <th>代號</th>
-            <th>名稱</th>
-            <th class="num">現價</th>
-            <th class="num">較昨收(%)</th>
-            <th class="num">累積量(張)</th>
-            <th class="num">盤中爆量倍數</th>
-            <th class="num">前20日高</th>
-            <th class="num">突破門檻</th>
-            <th class="num">綜合分數</th>
-          </tr>
-        </thead>
-        <tbody>
-          {''.join(rows)}
-        </tbody>
-      </table>
-    </div>
-    """, unsafe_allow_html=True)
+    # ✅ 注意：這裡是完整 HTML 文件，放進 components.html 就不會被當成文字顯示
+    html = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8"/>
+      <style>
+        :root {{
+          --bg:#07080b;
+          --panel:#0b0d12;
+          --text:#e5e7eb;
+          --muted:#9ca3af;
+          --line:rgba(148,163,184,.16);
+          --hi: rgba(148,163,184,.08);
+        }}
+        body {{
+          margin:0;
+          background: transparent;
+          color: var(--text);
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", Arial, sans-serif;
+        }}
+        .wrap {{
+          max-height: 560px;
+          overflow:auto;
+          border: 1px solid var(--line);
+          border-radius: 16px;
+          background: rgba(15,17,22,.70);
+        }}
+        table {{
+          width:100%;
+          border-collapse: separate;
+          border-spacing: 0;
+          font-size: 13px;
+        }}
+        thead th {{
+          position: sticky;
+          top: 0;
+          z-index: 2;
+          text-align: left;
+          padding: 12px 12px;
+          background: rgba(15,17,22,.98);
+          color: var(--text);
+          border-bottom: 1px solid var(--line);
+          font-weight: 900;
+        }}
+        tbody td {{
+          padding: 11px 12px;
+          border-bottom: 1px solid rgba(148,163,184,.10);
+          color: var(--text);
+          background: rgba(11,13,18,.92);
+          white-space: nowrap;
+        }}
+        tbody tr:hover td {{
+          background: var(--hi);
+        }}
+        .num {{ text-align:right; font-variant-numeric: tabular-nums; }}
+        .center {{ text-align:center; }}
+        .muted {{ color: var(--muted); }}
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="center">#</th>
+              <th>代號</th>
+              <th>名稱</th>
+              <th class="num">現價</th>
+              <th class="num">較昨收(%)</th>
+              <th class="num">累積量(張)</th>
+              <th class="num">盤中爆量倍數</th>
+              <th class="num">前20日高</th>
+              <th class="num">突破門檻</th>
+              <th class="num">綜合分數</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows)}
+          </tbody>
+        </table>
+      </div>
+    </body>
+    </html>
+    """
+
+    # ✅ 用 components.html 渲染，不會出現你截圖那種「把 <tr> 當文字」的情況
+    components.html(html, height=610, scrolling=False)
 
 # =========================
 # Sidebar
@@ -718,3 +788,4 @@ if run_scan:
             render_pretty_table(result)
 
 st.caption("懶人版：只留『風險等級』與『股票池』；其餘條件內建。")
+
