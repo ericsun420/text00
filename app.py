@@ -1319,6 +1319,7 @@ st.markdown("""
 if run_scan:
     with st.spinner("抓取盤中 5m（分批）..."):
         bars_today = fetch_intraday_bars_5m(codes_to_scan, batch_size=60)
+
 # =========================
 # 🧭 族群共振 Radar（獨立掃描區塊，不用搜尋）
 # =========================
@@ -1372,7 +1373,8 @@ else:
             continue
         with st.expander(f"📌 {sec}（Top {len(sub)}）", expanded=False):
             cols_show = ["排名","代號","名稱","熱度分","貼板","距離漲停(%)","較昨收(%)","盤中爆量倍數(快)","累積量(張)","回落(%)"]
-            st.dataframe(sub[cols_show], use_container_width=True, height=420)
+            
+          st.dataframe(sub[cols_show], use_container_width=True, height=420)
     if not bars_today:
         st.error("盤中 5m 抓不到資料（yfinance intraday 可能被限制）。")
         st.stop()
@@ -1611,4 +1613,5 @@ def scan_sector_resonance_radar(
         sector_members[sec] = sub
 
     return sector, sector_members
+
 
