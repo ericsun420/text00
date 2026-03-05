@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 5.2｜工業級診斷架構｜Apple Pro 美學｜效能與資料品質監控
+# app.py — 起漲戰情室｜戰神 5.3｜工業級防護與精準校準｜Apple Pro 旗艦版
 import io
 import math
 import time
@@ -20,7 +20,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 def diag_init():
     return {
-        "meta_count": 0, "mis_req_err": 0, "mis_rows": 0, "mis_skip_parse": 0,
+        "meta_count": 0, "cand_total": 0, "mis_req_err": 0, "mis_rows": 0, "mis_skip_parse": 0,
         "yf_symbols": 0, "yf_fail": 0, "other_err": 0,
         "last_errors": deque(maxlen=5),
         "t_meta": 0.0, "t_mis": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0
@@ -41,9 +41,9 @@ def yf_download_daily(syms):
     return yf.download(tickers=" ".join(syms), period="120d", interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
 
 # =========================
-# UI / THEME
+# UI / THEME (Apple Style)
 # =========================
-st.set_page_config(page_title="WarRoom Pro 5.2", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro 5.3", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
@@ -52,17 +52,28 @@ st.markdown("""
     .title { font-size: 52px; font-weight: 800; background: linear-gradient(180deg, #ffffff, #a1a1a6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
     .pro-card { background: rgba(28, 28, 30, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 24px; margin-bottom: 16px; }
     .stock-name { font-size: 20px; font-weight: 700; color: #ffffff; }
-    .price-large { font-size: 32px; font-weight: 700; color: #ffffff; }
-    .tag-pro { padding: 4px 12px; border-radius: 8px; font-size: 11px; font-weight: 700; background: rgba(0, 122, 255, 0.15); color: #0a84ff; }
+    .price-large { font-size: 32px; font-weight: 700; color: #ffffff; font-variant-numeric: tabular-nums; }
+    .tag-pro { padding: 4px 12px; border-radius: 8px; font-size: 11px; font-weight: 700; background: rgba(0, 122, 255, 0.15); color: #0a84ff; border: 1px solid rgba(0, 122, 255, 0.3); }
     .fail-tag { display: inline-block; padding: 4px 10px; background: rgba(255, 69, 58, 0.08); color: #ff453a; border-radius: 6px; margin: 3px; font-size: 11px; border: 1px solid rgba(255, 69, 58, 0.15); }
     .stButton>button { border-radius: 14px !important; background: #ffffff !important; color: #000000 !important; font-weight: 700; padding: 18px !important; width: 100% !important; border: none; }
+    .status-caption { color: #86868b; font-size: 12px; text-align: center; margin-top: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
 # =========================
-# ENGINES (Diag Enabled)
+# HELPERS
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
+
+def tw_tick(price):
+    return 0.01 if price < 10 else 0.05 if price < 50 else 0.1 if price < 100 else 0.5 if price < 500 else 1.0 if price < 1000 else 5.0
+
+def calc_limit_up(prev_close, limit_pct=0.10):
+    raw = prev_close * (1.0 + limit_pct)
+    tick = tw_tick(raw)
+    n = math.floor((raw + 1e-12) / tick)
+    price = n * tick
+    return round(price, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 def split_nums(s):
     out = []
@@ -73,12 +84,9 @@ def split_nums(s):
         except: pass
     return out
 
-def calc_limit_up(prev_close, limit_pct=0.10):
-    raw = prev_close * (1.0 + limit_pct)
-    tick = 0.01 if raw<10 else 0.05 if raw<50 else 0.1 if raw<100 else 0.5 if raw<500 else 1.0 if raw<1000 else 5.0
-    n = math.floor((raw + 1e-12) / tick)
-    return round(n * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
-
+# =========================
+# ENGINES
+# =========================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     meta, session = {}, make_retry_session()
@@ -116,7 +124,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test):
         try:
             r = session.get(url, headers=headers, timeout=12)
             data = r.json().get("msgArray", [])
-        except Exception as e:
+        except:
             err_mis += 1; mis_diag["mis_req_err"] += 1; continue
 
         for q in data:
@@ -126,20 +134,25 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test):
                 if z in (None, "", "-", "—") or u in (None, "", "-", "—") or y in (None, "", "-", "—", "0"):
                     mis_diag["mis_skip_parse"] += 1; continue
                 last, upper, prev_close, vol_sh = float(z), float(u), float(y), float(v or 0)
-                if upper <= 0 or prev_close <= 0: # 【修正：防止除以 0】
+                if upper <= 0 or prev_close <= 0:
                     mis_diag["mis_skip_parse"] += 1; continue
                 dist_pct = max(0.0, ((upper - last) / upper) * 100)
                 if (vol_sh / 1000) >= vol_limit and dist_pct <= dist_limit:
-                    rows.append({"code": c, "last": last, "upper": upper, "dist": dist_pct, "vol_sh": vol_sh, "prev_close": prev_close,
-                                 "high": float(q.get("h") if q.get("h") not in (None,"","-","—") else last),
-                                 "best_bid": split_nums(q.get("b"))[0] if q.get("b") else 0,
-                                 "bid_sh1": split_nums(q.get("g"))[0] if q.get("g") else 0})
+                    bp = split_nums(q.get("b"))
+                    bv = split_nums(q.get("g"))
+                    rows.append({
+                        "code": c, "last": last, "upper": upper, "dist": dist_pct, "vol_sh": vol_sh, "prev_close": prev_close,
+                        "high": float(q.get("h") if q.get("h") not in (None,"","-","—") else last),
+                        "low":  float(q.get("l") if q.get("l") not in (None,"","-","—") else last),
+                        "best_bid": bp[0] if bp else 0.0,
+                        "bid_sh1":  bv[0] if bv else 0.0
+                    })
                     mis_diag["mis_rows"] += 1
             except: mis_diag["mis_skip_parse"] += 1
         time.sleep(0.12 if not is_test else 0.01)
     return pd.DataFrame(rows), err_mis, mis_diag
 
-def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, use_lock, use_hype):
+def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, use_lock, use_hype, diag):
     stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "過熱排除": [], "未鎖死": []}
     yf_diag = {"yf_symbols": 0, "yf_fail": 0, "other_err": 0}
     if candidates_df.empty: return pd.DataFrame(), stats, yf_diag
@@ -167,19 +180,19 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, use_lock, use_
             past_df = dfD.iloc[:-1].copy() if dfD.index[-1].date() == today_date else dfD.copy()
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
             
-            # 連板計算
+            # 連板計算 (Tick 加固)
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
                 lim = calc_limit_up(pp, 0.20) if abs(cp/pp - 1.20) < 0.01 else calc_limit_up(pp, 0.10)
-                if cp >= (lim - 0.05): past_boards += 1
+                if cp >= (lim - tw_tick(lim)): past_boards += 1
                 else: break
 
             if use_hype and past_boards == 0 and any(float(past_10["Close"].iloc[j]/past_10["Close"].iloc[j-1]) > 1.095 for j in range(1, len(past_10))):
                 stats["過熱排除"].append(f"{c} {name}"); continue
 
             min_bid = 80_000 if r["last"] < 50 else 120_000 if r["last"] < 100 else 200_000
-            is_locked = (r["best_bid"] >= r["upper"] - 0.1) and (r["bid_sh1"] >= min_bid)
+            is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= min_bid)
             if not is_locked:
                 stats["未鎖死"].append(f"{c} {name}")
                 if use_lock: continue
@@ -192,13 +205,14 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, use_lock, use_
             if (r["last"] - r["low"]) / max(1e-9, rng) < (0.5 if is_test else 0.80) and rng > 0.1: stats["收盤太弱"].append(f"{c} {name}"); continue
 
             results.append({"代號": c, "名稱": name, "現價": r["last"], "爆量": vol_ratio, "狀態": "🔒 已鎖" if is_locked else "⚡ 發動", "階段": f"連續 {past_boards+1} 板"})
-        except Exception as e: yf_diag["other_err"] += 1; diag_err(yf_diag, e, "FILTER")
+        except Exception as e:
+            yf_diag["other_err"] += 1; diag_err(diag, e, "FILTER")
     return pd.DataFrame(results), stats, yf_diag
 
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 5.2</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">WarRoom Pro 5.3</div>', unsafe_allow_html=True)
 col_cfg = st.columns(4)
 with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
 with col_cfg[1]: use_lock = st.toggle("⚔️ 必須鎖死", value=False)
@@ -216,31 +230,35 @@ if st.button("🚀 啟動診斷級掃描"):
         t = time.perf_counter(); now_ts = now_taipei()
         pre_df, mis_err, mis_diag = fast_mis_scan(meta, status, now_ts, is_test)
         diag["t_mis"] = time.perf_counter() - t; diag.update(mis_diag)
+        diag["cand_total"] = len(pre_df) # 【修正：存入初始候選數】
         
         t = time.perf_counter()
-        final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, use_lock, use_hype)
+        final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, use_lock, use_hype, diag)
         diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
         
         diag["total"] = time.perf_counter() - t0
         status.update(label="✅ 分析完成", state="complete")
-    st.session_state["last_scan"] = {"final_res": final_res, "stats": stats, "diag": diag, "ts": now_ts}
+    st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts}
 
 scan = st.session_state.get("last_scan")
 if scan:
-    d, res, sts = scan["diag"], scan["final_res"], scan["stats"]
-    st.caption(f"上次更新：{scan['ts'].strftime('%H:%M:%S')} | 耗時：{d['total']:.2f}s")
+    d, res, sts = scan["diag"], scan["res"], scan["stats"]
+    st.markdown(f'<div class="status-caption">上次更新：{scan["ts"].strftime("%H:%M:%S")} | 耗時：{d["total"]:.2f}s</div>', unsafe_allow_html=True)
     
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("初始候選", d.get("Total", 0))
+    m1.metric("初始候選", d.get("cand_total", 0))
     m2.metric("錄取檔數", len(res))
-    m3.metric("資料品質", f"{100 - (d.get('mis_skip_parse',0)/max(1,d.get('meta_count',1))*100):.1f}%")
+    # 【修正：正確計算資料品質】
+    total_mis = d.get("mis_rows", 0) + d.get("mis_skip_parse", 0)
+    quality = 100.0 if total_mis == 0 else (d.get("mis_rows", 0) / total_mis * 100.0)
+    m3.metric("資料品質", f"{quality:.1f}%")
     m4.metric("系統異常", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
 
-    with st.expander("🧪 系統診斷 (資料源/效能/錯誤)", expanded=False):
+    with st.expander("🧪 系統診斷 (效能/錯誤追蹤)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Meta 檔數", d.get("meta_count"))
-        c2.metric("MIS 入列", d.get("mis_rows"))
-        c3.metric("MIS 請求失敗", d.get("mis_req_err"))
+        c1.metric("全市場", d.get("meta_count"))
+        c2.metric("MIS 有效筆數", d.get("mis_rows"))
+        c3.metric("MIS 解析失敗", d.get("mis_skip_parse"))
         c4.metric("YF 下載失敗", d.get("yf_fail"))
         st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | Filter {d['t_filter']:.2f}s")
         if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
