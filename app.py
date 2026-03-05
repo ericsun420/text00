@@ -1319,7 +1319,60 @@ st.markdown("""
 if run_scan:
     with st.spinner("抓取盤中 5m（分批）..."):
         bars_today = fetch_intraday_bars_5m(codes_to_scan, batch_size=60)
+# =========================
+# 🧭 族群共振 Radar（獨立掃描區塊，不用搜尋）
+# =========================
+st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+st.subheader("🧭 族群共振 Radar（獨立掃描）")
 
+# 你可以依模式自動調整門檻（保守更嚴格）
+heat_thr = 70.0 if "保守" in mode else (55.0 if "積極" in mode else 62.0)
+
+with st.spinner("掃描族群共振（整個股票池：看誰在一起熱、一起貼板）..."):
+    sector_rank_df, sector_members = scan_sector_resonance_radar(
+        bars_today=bars_today,
+        base_df=base,     # 你日線基準那個 DataFrame（已 set_index 也OK）
+        meta_df=meta,     # MOPS 的 code/name/industry
+        now_ts=now_ts,
+        heat_threshold=heat_thr,
+        near_ticks=2,
+        top_sectors=10,
+        top_members=12
+    )
+
+if sector_rank_df.empty:
+    st.info("目前掃不到族群共振（可能盤中資料不足或資料源被限制）。")
+else:
+    # Top 族群卡片
+    cols = st.columns(4)
+    for i, (_, r) in enumerate(sector_rank_df.head(8).iterrows(), start=1):
+        with cols[(i - 1) % 4]:
+            st.markdown(f"""
+<div class="card">
+  <div class="k">#{int(r['排名'])} 族群共振</div>
+  <div class="v">{html.escape(str(r['族群名稱']))}</div>
+  <div class="hr"></div>
+  <div class="small-note">共振分：{float(r['共振分']):.1f} ｜ 熱檔：{int(r['熱檔數'])} ｜ 貼板：{int(r['貼板數'])}</div>
+  <div class="small-note">掃描檔數：{int(r['掃描檔數'])} ｜ 平均熱度：{float(r['平均熱度']):.1f}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    # 族群排行榜（表格）
+    with st.expander("📋 族群共振排行榜（Top 10）", expanded=True):
+        show = sector_rank_df.copy()
+        st.dataframe(show, use_container_width=True)
+
+    # 每個族群 Top 成員
+    st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
+    st.subheader("🔥 各族群 Top 成員（熱度最高）")
+
+    for sec in sector_rank_df["族群名稱"].tolist():
+        sub = sector_members.get(sec, pd.DataFrame())
+        if sub.empty:
+            continue
+        with st.expander(f"📌 {sec}（Top {len(sub)}）", expanded=False):
+            cols_show = ["排名","代號","名稱","熱度分","貼板","距離漲停(%)","較昨收(%)","盤中爆量倍數(快)","累積量(張)","回落(%)"]
+            st.dataframe(sub[cols_show], use_container_width=True, height=420)
     if not bars_today:
         st.error("盤中 5m 抓不到資料（yfinance intraday 可能被限制）。")
         st.stop()
@@ -1558,3 +1611,4 @@ def scan_sector_resonance_radar(
         sector_members[sec] = sub
 
     return sector, sector_members
+
