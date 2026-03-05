@@ -59,11 +59,11 @@ def get_all_twse_stocks():
 
 stock_list = get_all_twse_stocks()
 
-# --- 2. 核心掃描邏輯 (加入季線濾網，過濾假突破) ---
+# --- 2. 核心掃描邏輯 (加入「浪子回頭」分類器) ---
 @st.cache_data(ttl=3600) 
 def scan_market(tickers):
     results = []
-    # 【重要修改 1】：因為要算 60 日季線，我們抓資料的時間要拉長到 120 天前（確保有足夠的交易日可算）
+    # 為了計算 60 日季線，我們抓資料的時間拉長到 120 天前
     start_date = datetime.today() - timedelta(days=120) 
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -82,23 +82,32 @@ def scan_market(tickers):
                 
             df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
             df['Price_Max20'] = df['Close'].rolling(window=20).max()
-            df['MA60'] = df['Close'].rolling(window=60).mean() # 【重要修改 2】：計算 60 日季線
+            df['MA20'] = df['Close'].rolling(window=20).mean() # 月線
+            df['MA60'] = df['Close'].rolling(window=60).mean() # 季線
             df['Daily_Return'] = df['Close'].pct_change()
             
             last_row = df.iloc[-1]
             prev_row = df.iloc[-2]
             
+            # 基本起漲條件
             cond_vol = last_row['Volume'] > (prev_row['Vol_MA20'] * 2.5)
             cond_price = last_row['Close'] >= prev_row['Price_Max20']
             cond_red_candle = last_row['Daily_Return'] > 0.04
             
-            # 【重要修改 3】：防假突破濾網！收盤價必須大於季線，且季線最好是上揚的
-            cond_trend = last_row['Close'] > last_row['MA60'] 
+            # 浪子考核標準：今天的收盤價，必須大於季線 (證明是真的轉強)
+            cond_above_ma60 = last_row['Close'] > last_row['MA60'] 
             
-            # 把趨勢濾網 cond_trend 也加進去判斷
-            if cond_vol and cond_price and cond_red_candle and cond_trend:
+            if cond_vol and cond_price and cond_red_candle and cond_above_ma60:
+                
+                # 分類器：判斷是本來就很強，還是剛從底部翻起來
+                if last_row['MA20'] > last_row['MA60']:
+                    pattern_tag = "🔥 多頭強勢"
+                else:
+                    pattern_tag = "👼 浪子回頭"
+                    
                 results.append({
                     "股票代號": ticker,
+                    "型態分類": pattern_tag,
                     "最新收盤價": float(last_row['Close']),
                     "單日漲跌幅": float(last_row['Daily_Return']) * 100,
                     "今日成交量": int(last_row['Volume'] / 1000),
@@ -158,4 +167,5 @@ with col2:
     if st.button("🔄 重新掃描最新數據", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+
 
