@@ -1,120 +1,90 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
-# --- 1. 網頁基本設定 ---
-st.set_page_config(page_title="第一批飆股雷達與回測", page_icon="📈", layout="wide")
-st.title("🎯 突破爆量飆股：回測與掃描系統")
+st.set_page_config(page_title="每日飆股自動掃描器", page_icon="🎯", layout="wide")
+st.title("🎯 每日飆股自動掃描器")
+st.write("一鍵掃描全市場，找出今天符合「爆量2.5倍 + 突破20日高點 + 實體長紅」的潛力股！")
 
-# --- 2. 側邊欄：使用者輸入區 ---
-st.sidebar.header("設定回測參數")
-# 預設股票代號為大同 (2371)
-ticker_input = st.sidebar.text_input("輸入台股代號 (純數字)", value="2371")
-ticker = f"{ticker_input}.TW"
+# 1. 設定要掃描的股票池
+# 實務上這裡可以放幾百檔台股代碼，為了示範速度，這裡先放一些熱門股與近期波動股
+# 你可以隨時在這個陣列裡面新增你想觀察的台股代號
+DEFAULT_STOCK_LIST = [
+    '2330', '2317', '2454', '2382', '2489', '2371', '2362', '3231', '3017', '2301',
+    '2603', '2609', '2615', '1519', '1514', '3450', '3443', '3037', '2368', '3008'
+]
 
-# 設定預設日期 (抓取過去 8 個月的資料，確保有足夠時間計算均線與回測)
-end_date_default = datetime.today()
-start_date_default = end_date_default - timedelta(days=240) 
+stock_input = st.text_area("要掃描的股票代碼 (請用半形逗號分隔)", value=",".join(DEFAULT_STOCK_LIST))
+stock_list = [s.strip() for s in stock_input.split(',')]
 
-start_date = st.sidebar.date_input("開始日期", value=start_date_default)
-end_date = st.sidebar.date_input("結束日期", value=end_date_default)
-
-# --- 3. 核心功能：抓取資料與計算 ---
-@st.cache_data # 使用快取，避免每次操作網頁都重新下載資料
-def load_data(ticker, start, end):
-    df = yf.download(ticker, start=start, end=end, progress=False)
-    if df.empty:
-        return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
+# 2. 核心掃描邏輯
+@st.cache_data(ttl=3600) # 快取 1 小時，避免重複點擊時一直重新下載
+def scan_market(tickers):
+    results = []
+    # 只需要抓過去 40 天的資料就足夠計算 20 日均線和昨天的 20 日高點了
+    start_date = datetime.today() - timedelta(days=60)
     
-    # 技術指標計算
-    df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
-    df['Price_Max20'] = df['Close'].rolling(window=20).max()
-    df['MA10'] = df['Close'].rolling(window=10).mean()
-    df['Daily_Return'] = df['Close'].pct_change()
+    # 建立進度條，讓你知道掃描到哪裡
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    # 進場條件：爆量2.5倍 + 突破20日高點 + 實體紅K(漲幅>4%)
-    cond_vol = df['Volume'] > (df['Vol_MA20'].shift(1) * 2.5)
-    cond_price = df['Close'] >= df['Price_Max20'].shift(1)
-    cond_red_candle = df['Daily_Return'] > 0.04
-    df['Buy_Signal'] = cond_vol & cond_price & cond_red_candle
-    
-    return df
-
-# --- 4. 執行回測邏輯 ---
-def run_backtest(df):
-    in_position = False
-    buy_price = 0
-    trades = []
-    
-    for i in range(20, len(df)):
-        current_date = df.index[i]
-        close_price = df['Close'].iloc[i]
+    for i, ticker in enumerate(tickers):
+        status_text.text(f"正在掃描: {ticker} ({i+1}/{len(tickers)})")
+        progress_bar.progress((i + 1) / len(tickers))
         
-        # 出場：跌破10日線
-        if in_position:
-            if close_price < df['MA10'].iloc[i]:
-                profit_pct = (close_price - buy_price) / buy_price * 100
-                trades.append({
-                    '買進日期': buy_date.strftime('%Y-%m-%d'),
-                    '賣出日期': current_date.strftime('%Y-%m-%d'),
-                    '報酬率(%)': round(profit_pct, 2)
-                })
-                in_position = False
-        # 進場：出現訊號
-        elif not in_position and df['Buy_Signal'].iloc[i]:
-            buy_price = close_price
-            buy_date = current_date
-            in_position = True
-            
-    return pd.DataFrame(trades)
-
-# --- 5. 畫面渲染與圖表繪製 ---
-if st.sidebar.button("開始回測"):
-    with st.spinner('正在抓取資料與計算中...'):
-        df = load_data(ticker, start_date, end_date)
-        
-        if df is None:
-            st.error("找不到該檔股票的資料，請確認代號是否正確。")
-        else:
-            trades_df = run_backtest(df)
-            
-            # 頂部數據卡片 (直覺呈現績效)
-            st.subheader(f"📊 {ticker_input} 回測績效總結")
-            col1, col2, col3 = st.columns(3)
-            
-            total_trades = len(trades_df)
-            if total_trades > 0:
-                win_rate = len(trades_df[trades_df['報酬率(%)'] > 0]) / total_trades * 100
-                total_return = trades_df['報酬率(%)'].sum()
+        try:
+            # 抓取資料
+            df = yf.download(f"{ticker}.TW", start=start_date, progress=False)
+            if df.empty or len(df) < 21:
+                continue
                 
-                col1.metric("總交易次數", f"{total_trades} 次")
-                col2.metric("策略勝率", f"{win_rate:.1f} %")
-                col3.metric("累積報酬率", f"{total_return:.2f} %", delta=f"{total_return:.2f}%", delta_color="normal" if total_return > 0 else "inverse")
-            else:
-                st.info("這段期間內沒有出現符合條件的進場訊號。")
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.droplevel(1)
+                
+            # 計算指標
+            df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
+            df['Price_Max20'] = df['Close'].rolling(window=20).max()
+            df['Daily_Return'] = df['Close'].pct_change()
             
-            st.divider()
+            # 取得「最新一天」的資料與「前一天」的資料
+            last_row = df.iloc[-1]
+            prev_row = df.iloc[-2]
             
-            # 互動式 K 線圖 (使用 Plotly)
-            st.subheader("📈 股價走勢與 10 日均線")
-            fig = go.Figure()
-            # 畫 K 線
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='K線'))
-            # 畫 10 日均線 (出場防守線)
-            fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], mode='lines', name='10日均線', line=dict(color='blue', width=1.5)))
+            # 判斷條件
+            # A: 今日成交量 > 昨天算出的20日均量 * 2.5
+            cond_vol = last_row['Volume'] > (prev_row['Vol_MA20'] * 2.5)
+            # B: 今日收盤價 >= 昨天算出的過去20日最高價
+            cond_price = last_row['Close'] >= prev_row['Price_Max20']
+            # C: 實體紅K，今日漲幅 > 4%
+            cond_red_candle = last_row['Daily_Return'] > 0.04
             
-            # 標註進場點 (出現 Buy_Signal 的地方)
-            buy_signals = df[df['Buy_Signal']]
-            fig.add_trace(go.Scatter(x=buy_signals.index, y=buy_signals['Low'] * 0.95, mode='markers', name='進場訊號', marker=dict(symbol='triangle-up', size=12, color='red')))
+            if cond_vol and cond_price and cond_red_candle:
+                results.append({
+                    "股票代號": ticker,
+                    "最新收盤價": round(float(last_row['Close']), 2),
+                    "單日漲跌幅(%)": f"{round(float(last_row['Daily_Return']) * 100, 2)}%",
+                    "今日成交量(張)": int(last_row['Volume'] / 1000), # yfinance的台股Volume通常是股數，除以1000變張數
+                    "爆量倍數": round(float(last_row['Volume'] / prev_row['Vol_MA20']), 1)
+                })
+        except Exception as e:
+            continue # 遇到下市或抓不到的股票就跳過
             
-            fig.update_layout(height=500, xaxis_rangeslider_visible=False, template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # 交易明細表格
-            if total_trades > 0:
-                st.subheader("📝 交易明細紀錄")
-                st.dataframe(trades_df, use_container_width=True)
+    status_text.text("掃描完成！")
+    return pd.DataFrame(results)
+
+# 3. 觸發掃描與顯示結果
+if st.button("🚀 立即掃描今日飆股", type="primary"):
+    with st.spinner("系統正在努力幫您掃描市場中，請稍候..."):
+        scan_results_df = scan_market(stock_list)
+        
+        st.divider()
+        st.subheader("📊 今日符合『爆量突破』條件的股票清單")
+        
+        if not scan_results_df.empty:
+            # 顯示結果表格
+            st.dataframe(scan_results_df, use_container_width=True)
+            st.success(f"太棒了！在 {len(stock_list)} 檔股票中，為您抓出了 {len(scan_results_df)} 檔潛力股。")
+        else:
+            st.info("今天市場比較平淡，您設定的股票池中沒有符合條件的標的喔！")
+            st.image("https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?auto=format&fit=crop&q=80&w=800", caption="耐心等待好球進壘，才是獲利的關鍵。")
