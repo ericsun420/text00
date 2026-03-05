@@ -1,4 +1,4 @@
-# app.py — 終極極簡暴力版｜嚴格篩除權證｜分批防卡死引擎
+# app.py — 起漲先機通吃版 (1~3根)｜完美支援盤後複盤｜極簡暴力
 import io
 import math
 import time
@@ -15,7 +15,7 @@ import streamlit.components.v1 as components
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
-# UI / THEME (冷酷黑灰，完全隱藏設定)
+# UI / THEME
 # =========================
 st.set_page_config(page_title="起漲戰情室｜極簡暴力", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
@@ -28,7 +28,7 @@ CSS = """
 }
 [data-testid="stAppViewContainer"], .main{ background: var(--bg) !important; color: var(--text) !important; }
 .block-container{ padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px; }
-[data-testid="stSidebar"] { display: none !important; } /* 暴力隱藏側邊欄 */
+[data-testid="stSidebar"] { display: none !important; }
 [data-testid="stHeader"]{ background: transparent !important; }
 
 .title{ font-size: 46px; font-weight: 900; background: linear-gradient(90deg, #f3f4f6, #9ca3af); -webkit-background-clip:text; -webkit-text-fill-color: transparent; margin:0; text-align: center; }
@@ -39,7 +39,11 @@ CSS = """
 .metric .code{ color: var(--text); font-size: 20px; font-weight: 900; }
 .metric .name{ color: var(--muted); font-size: 14px; margin-left: 8px;}
 .metric .price{ font-size: 26px; font-weight: 900; color: var(--text); }
-.tag{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid var(--line); background: rgba(15,17,22,.8); color: var(--text); }
+
+/* 階段標籤設計 */
+.tag-stage1{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid #3b82f6; background: rgba(59,130,246,0.2); color: #93c5fd; font-weight: bold;}
+.tag-stage2{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid #f97316; background: rgba(249,115,22,0.2); color: #fdba74; font-weight: bold;}
+.tag-stage3{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid #ef4444; background: rgba(239,68,68,0.2); color: #fca5a5; font-weight: bold;}
 
 .stButton>button{ border-radius: 16px !important; border: 1px solid rgba(255,255,255,0.2) !important; background: linear-gradient(90deg, #1f2937, #111827) !important; color: white !important; font-weight: 900 !important; font-size: 20px !important; padding: 25px !important; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
 .stButton>button:hover{ border-color: #f87171 !important; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(248,113,113,0.2); }
@@ -67,57 +71,49 @@ def calc_limit_up(prev_close, limit_pct):
     return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 # =========================
-# ENGINE 1: 股票清單 (嚴格過濾 4萬檔權證)
+# ENGINE 1: 股票清單 (防彈雙備援)
 # =========================
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def get_stock_list():
     meta = {}
-    # 來源 1: 官方 OpenAPI
     try:
         r1 = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=5, verify=False)
         for item in r1.json():
-            c = str(item.get("公司代號", "")).strip()
-            # 【致命修正】：嚴格要求代號必須是 4 位數字，斬殺所有權證與下市股
-            if len(c) == 4 and c.isdigit(): 
-                meta[c] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "TW"}
+            if re.match(r"^\d{4,6}$", item["公司代號"]): meta[item["公司代號"]] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "tse"}
         r2 = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=5, verify=False)
         for item in r2.json():
-            c = str(item.get("公司代號", "")).strip()
-            if len(c) == 4 and c.isdigit(): 
-                meta[c] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "TWO"}
-        if len(meta) > 1000: return meta
+            if re.match(r"^\d{4,6}$", item["公司代號"]): meta[item["公司代號"]] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "otc"}
+        if len(meta) > 500: return meta
     except: pass
 
-    # 來源 2: GitHub 備援
-    urls = [("TW", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
-            ("TWO", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
+    urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
+            ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
         try:
             r = requests.get(url, timeout=5, verify=False)
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), on_bad_lines="skip")
             for _, row in df.iterrows():
                 c = str(row.iloc[1] if len(row)>1 else "").strip()
-                if len(c) == 4 and c.isdigit(): 
-                    meta[c] = {"name": str(row.iloc[2]), "ind": str(row.iloc[6]) if len(row)>6 else "", "ex": ex}
+                if re.match(r"^\d{4,6}$", c): meta[c] = {"name": str(row.iloc[2]), "ind": str(row.iloc[6]) if len(row)>6 else "", "ex": ex}
         except: pass
     if not meta: raise ValueError("完全無法連線取得股票清單，請確認網路或稍後再試。")
     return meta
 
 # =========================
-# ENGINE 2: 分批 Yahoo 快篩 (保證進度條會跑)
+# ENGINE 2: 全市場 Yahoo 歷史與即時快篩
 # =========================
 def fast_yahoo_scan(meta_dict, status_placeholder):
-    sym_to_code = {f"{c}.{v['ex']}": c for c, v in meta_dict.items()}
+    sym_to_code = {f"{c}.{'TW' if v['ex']=='tse' else 'TWO'}": c for c, v in meta_dict.items()}
     syms = list(sym_to_code.keys())
     
     rows = []
-    batch_size = 200 # 分批向 Yahoo 要資料，絕對不會卡死
+    batch_size = 200 
     total_batches = math.ceil(len(syms) / batch_size)
     
     for i in range(0, len(syms), batch_size):
         chunk = syms[i:i+batch_size]
         batch_num = (i // batch_size) + 1
-        status_placeholder.update(label=f"📡 全市場快篩中：正在下載第 {batch_num} / {total_batches} 批次 ({len(syms)} 檔真股票)...", state="running")
+        status_placeholder.update(label=f"📡 全市場快篩中：正在下載第 {batch_num} / {total_batches} 批次...", state="running")
         
         try:
             raw = yf.download(tickers=" ".join(chunk), period="5d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
@@ -130,14 +126,14 @@ def fast_yahoo_scan(meta_dict, status_placeholder):
                     prev_close = float(df["Close"].iloc[-2])
                     vol_lots = int(float(df["Volume"].iloc[-1]) / 1000)
                     
-                    # 【極簡暴力濾網】：只留盤中量 > 1000張，且距離漲停 < 3.0%
+                    # 盤中量 > 800張，且距離漲停 < 3.0%
                     limit_up = calc_limit_up(prev_close, 0.10)
                     dist = ((limit_up - last) / limit_up) * 100
                     
-                    if vol_lots >= 1000 and dist <= 3.0:
+                    if vol_lots >= 800 and dist <= 3.0:
                         rows.append({
                             "code": sym_to_code[sym], "last": last, "upper": limit_up, 
-                            "dist": dist, "vol_lots": vol_lots, "yday": prev_close
+                            "dist": dist, "vol_lots": vol_lots, "prev_close": prev_close
                         })
                 except: continue
         except Exception:
@@ -147,15 +143,15 @@ def fast_yahoo_scan(meta_dict, status_placeholder):
     return pd.DataFrame(rows)
 
 # =========================
-# ENGINE 3: YFinance 日線與 5分K 深度濾網 (套用 1~8)
+# ENGINE 3: 日線與 5分K 深度濾網 (支援 1~3 根起漲)
 # =========================
 def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if candidates_df.empty: return pd.DataFrame()
-    syms = [f"{c}.{meta_dict[c]['ex']}" for c in candidates_df["code"]]
+    syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
     results = []
     frac = max(0.2, min(1.0, minutes_elapsed_in_session(now_ts) / 270.0))
 
-    status_placeholder.update(label=f"📊 鎖定 {len(syms)} 檔候選，正在進行 1~8 終極濾網運算...", state="running")
+    status_placeholder.update(label=f"📊 鎖定 {len(syms)} 檔候選，套用主力籌碼與階梯濾網...", state="running")
     
     try:
         raw_daily = yf.download(tickers=" ".join(syms), period="200d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
@@ -165,25 +161,41 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 
     for _, r in candidates_df.iterrows():
         c = r["code"]
-        sym = f"{c}.{meta_dict[c]['ex']}"
+        sym = f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}"
         try:
             dfD = raw_daily[sym].dropna() if isinstance(raw_daily.columns, pd.MultiIndex) else raw_daily.dropna()
             df5 = raw_5m[sym].dropna() if isinstance(raw_5m.columns, pd.MultiIndex) else raw_5m.dropna()
-            if len(dfD) < 60 or df5.empty: continue
+            if len(dfD) < 60: continue
 
-            # --- 日線特徵 ---
             closeD, highD, lowD, volD = dfD["Close"].astype(float), dfD["High"].astype(float), dfD["Low"].astype(float), dfD["Volume"].astype(float)
-            yday_close = float(closeD.iloc[-2] if dfD.index[-1].date() == now_ts.date() else closeD.iloc[-1])
             
             hist_ret = closeD.pct_change().dropna()
             limit_pct = 0.20 if (len(hist_ret)>10 and float(hist_ret.tail(150).max()) > 0.105) else 0.10
+            limit_thr = 0.19 if limit_pct == 0.20 else 0.095
             
-            # 【排雷濾網】：近10天大漲過，或是昨天爆量長上影線 -> 淘汰
-            max_ret_10d = float(hist_ret.tail(10).max()) * 100.0
-            vol_ma20 = float(volD.rolling(20).mean().iloc[-1])
-            if max_ret_10d >= (19.0 if limit_pct == 0.20 else 9.5): continue
+            # 【起漲先機升級】：計算「過去10天(不含今天)」有幾根漲停
+            past_returns = hist_ret.iloc[:-1] if not df5.empty else hist_ret
+            past_boards = int((past_returns.tail(10) >= limit_thr).sum())
             
+            # 如果已經有 3 根以上的漲停，直接淘汰 (拒吃魚尾)
+            if past_boards >= 3: continue
+            
+            # 給予階段標籤
+            if past_boards == 0:
+                stage_label = "🚀 第一根"
+                stage_class = "tag-stage1"
+                stage_bonus = 10.0 # 剛起漲加分
+            elif past_boards == 1:
+                stage_label = "🔥 第二根"
+                stage_class = "tag-stage2"
+                stage_bonus = 5.0  # 動能強勢加分
+            else:
+                stage_label = "⚠️ 第三根"
+                stage_class = "tag-stage3"
+                stage_bonus = -5.0 # 風險略高扣分
+
             # 【基底計算】
+            yday_close = float(r["prev_close"])
             ma20 = closeD.rolling(20).mean()
             base_len = int(((closeD / (ma20 + 1e-9) - 1.0).abs() <= 0.04).tail(60).sum())
             tr = pd.concat([(highD - lowD).abs(), (highD - closeD.shift(1)).abs(), (lowD - closeD.shift(1)).abs()], axis=1).max(axis=1)
@@ -192,45 +204,53 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             range60_pct = float((highD.rolling(60).max().iloc[-1] - lowD.rolling(60).min().iloc[-1]) / yday_close)
             base_tight = float((1.0 - min(1.0, range20_pct / (range60_pct + 1e-9))) * 0.6 + (1.0 - min(1.0, atr20_pct / 8.0)) * 0.4)
 
-            # --- 5分K 特徵 ---
-            day_high, day_low = float(df5["High"].max()), float(df5["Low"].min())
+            # --- 5分K 特徵 (若盤後無5m，用日線當天最高最低頂替) ---
+            if not df5.empty:
+                day_high, day_low = float(df5["High"].max()), float(df5["Low"].min())
+            else:
+                day_high, day_low = float(highD.iloc[-1]), float(lowD.iloc[-1])
+                
             tick = tw_tick(r["upper"])
             
             # 【鎖死品質與回落】
             rng = max(1e-9, day_high - day_low)
             close_pos = (r["last"] - day_low) / rng
             pullback = (day_high - r["last"]) / max(1e-9, day_high)
-            if pullback > 0.0038: continue # 回落超過 0.38% 淘汰
+            if pullback > 0.0040: continue # 回落超過 0.40% 淘汰
 
             # 【開板次數近似】
-            high5, close5 = df5["High"].astype(float).values, df5["Close"].astype(float).values
-            touch = high5 >= (r["upper"] - tick)
             open_board = 0
-            if touch.any():
-                in_limit = True
-                for i in range(int(touch.argmax()) + 1, len(close5)):
-                    if in_limit and close5[i] < (r["upper"] - 2.0 * tick): open_board += 1; in_limit = False
-                    elif not in_limit and high5[i] >= (r["upper"] - tick): in_limit = True
+            if not df5.empty:
+                high5, close5 = df5["High"].astype(float).values, df5["Close"].astype(float).values
+                touch = high5 >= (r["upper"] - tick)
+                if touch.any():
+                    in_limit = True
+                    for i in range(int(touch.argmax()) + 1, len(close5)):
+                        if in_limit and close5[i] < (r["upper"] - 2.0 * tick): open_board += 1; in_limit = False
+                        elif not in_limit and high5[i] >= (r["upper"] - tick): in_limit = True
 
             # 【爆量倍數】
+            vol_ma20 = float(volD.rolling(20).mean().iloc[-1])
             vol_ratio = (r["vol_lots"] * 1000) / (vol_ma20 * frac + 1e-9)
-            if vol_ratio < 1.5: continue # 爆量不足 1.5倍 淘汰
+            if vol_ratio < 1.3: continue # 至少要有 1.3 倍量
 
             # --- 綜合潛力計分 (0~100) ---
-            score = 0.0
-            score += 30.0 * min(1.0, max(0.0, (close_pos - 0.85) / 0.15))
-            score += 20.0 * min(1.0, max(0.0, (0.0038 - pullback) / 0.0038))
-            score += 20.0 * min(1.0, max(0.0, (vol_ratio - 1.5) / 2.5))
-            score += 15.0 * min(1.0, max(0.0, (base_len - 8) / 40.0))
+            score = 50.0 # 基礎分
+            score += stage_bonus
+            score += 15.0 * min(1.0, max(0.0, (close_pos - 0.85) / 0.15))
+            score += 15.0 * min(1.0, max(0.0, (0.0038 - pullback) / 0.0038))
+            score += 15.0 * min(1.0, max(0.0, (vol_ratio - 1.5) / 2.5))
+            score += 10.0 * min(1.0, max(0.0, (base_len - 8) / 40.0))
             score += 5.0 * min(1.0, max(0.0, base_tight))
-            score -= min(10.0, float(open_board) * 3.0) # 開板扣分
+            score -= min(10.0, float(open_board) * 3.0)
 
             results.append({
                 "代號": c, "名稱": meta_dict[c]["name"], "族群": meta_dict[c]["ind"],
                 "現價": r["last"], "漲停價": r["upper"], "距離漲停(%)": r["dist"],
                 "較昨收(%)": (r["last"] / yday_close - 1.0)*100, "累積量(張)": r["vol_lots"],
                 "盤中爆量倍數": vol_ratio, "開板次數": open_board, "基底天數": base_len,
-                "潛力分": max(0.0, min(100.0, score))
+                "潛力分": max(0.0, min(100.0, score)),
+                "階段標籤": stage_label, "階段Class": stage_class
             })
         except: continue
 
@@ -250,21 +270,20 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 # MAIN APP (無腦一鍵啟動)
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">極簡暴力版 ｜ 斬除權證干擾，一鍵貫穿 8 道主力濾網</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">極簡暴力版 ｜ 智慧追蹤第 1~3 根起漲點，盤中盤後皆可秒開</div>', unsafe_allow_html=True)
 
-run_scan = st.button("🚀 啟動掃描 (自動鎖定第一根)", use_container_width=True)
+run_scan = st.button("🚀 啟動掃描 (自動鎖定起漲先機)", use_container_width=True)
 
 if run_scan:
     with st.status("⚡ 系統極速運算中，請稍候...", expanded=True) as status:
         
-        status.update(label="📦 1/3 載入台股最新清單 (已濾除權證)...", state="running")
+        status.update(label="📦 1/3 載入台股最新清單...", state="running")
         try:
             meta = get_stock_list()
         except Exception as e:
             status.update(label="❌ 清單載入失敗", state="error")
             st.error(str(e)); st.stop()
             
-        # 把原本的 4萬多檔，直接縮減成乾淨的 1700多檔
         pre_df = fast_yahoo_scan(meta, status)
         
         if pre_df.empty:
@@ -280,21 +299,20 @@ if run_scan:
     # 渲染結果
     # =========================
     if final_res.empty:
-        st.warning("⚠️ 有股票接近漲停，但都被『排雷濾網』排除了 (多半是近期已經大漲過、回落太大或爆量不足)。")
+        st.warning("⚠️ 有股票接近漲停，但都被『排雷濾網』排除了 (可能是已漲超過 3 根、回落太大或爆量不足)。")
     else:
-        st.success(f"🎯 完美鎖定！為您篩選出 {len(final_res)} 檔『第一根漲停』完美標的。")
+        st.success(f"🎯 完美鎖定！為您篩選出 {len(final_res)} 檔『起漲黃金期』候選標的。")
         
-        # 精美卡片
+        # 精美卡片 (顯示起漲階段)
         cols = st.columns(min(len(final_res), 4))
-        for i, r in final_res.head(8).iterrows():
+        for i, r in final_res.head(12).iterrows():
             with cols[(i-1) % 4]:
-                tag = "🔒 幾乎鎖死" if r["潛力分"] >= 75 else "👀 候選"
                 st.markdown(f"""
                 <div class="card">
                     <div class="metric">
                         <div>
-                            <span class="tag">{tag}</span><br>
-                            <span class="code">{r['代號']}</span><span class="name">{r['名稱']}</span>
+                            <span class="{r['階段Class']}">{r['階段標籤']}</span><br>
+                            <span class="code" style="display:inline-block; margin-top:8px;">{r['代號']}</span><span class="name">{r['名稱']}</span>
                         </div>
                         <div class="price">{r['現價']:.2f}</div>
                     </div>
@@ -311,12 +329,13 @@ if run_scan:
                 
         # 匯出 CSV 按鈕
         st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
-        csv = final_res.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 匯出今日戰情報表 (CSV)", data=csv, file_name=f"第一根漲停_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv", use_container_width=True)
+        csv_df = final_res.drop(columns=["階段Class"])
+        csv = csv_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 匯出今日戰情報表 (CSV)", data=csv, file_name=f"起漲先機_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv", use_container_width=True)
         
         # 完整表格
         with st.expander("📋 展開完整數據表"):
-            st.dataframe(final_res.style.format({
+            st.dataframe(csv_df.style.format({
                 "現價":"{:.2f}", "漲停價":"{:.2f}", "距離漲停(%)":"{:.2f}%", "較昨收(%)":"{:.2f}%",
                 "累積量(張)":"{:,}", "盤中爆量倍數":"{:.2f}x", "潛力分":"{:.1f}"
             }), use_container_width=True)
