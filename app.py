@@ -1,10 +1,8 @@
-# app.py — 第一根漲停 + 連板潛力（1～8 全部改）｜冷酷黑灰｜懶人版｜卡片 + 美化表格｜可記錄/回測
-# pip install -U streamlit pandas yfinance requests urllib3
-
+# app.py — 第一根漲停 + 連板潛力（1～8 全部改）｜冷酷黑灰｜懶人版｜官方OpenAPI
 import os
 import math
 import time
-import io
+import re
 from datetime import datetime, timedelta, time as dtime
 
 import requests
@@ -114,38 +112,52 @@ LOG_PATH = os.path.join(DATA_DIR, "signals_log.csv")
 OUTCOME_PATH = os.path.join(DATA_DIR, "signals_outcome.csv")
 
 # =========================
-# STOCK LIST (防呆 GitHub 版：解決你的連線錯誤)
+# STOCK LIST (全面替換為官方 OpenAPI，保證不當機)
 # =========================
 @st.cache_data(ttl=24 * 3600, show_spinner=False)
 def fetch_listed_stocks_mops() -> pd.DataFrame:
     meta = []
-    urls = [
-        ("上市", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
-        ("上櫃", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")
-    ]
-    for market, url in urls:
-        try:
-            r = requests.get(url, timeout=10, verify=False)
-            df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str)
-            if "code" not in df.columns:
-                df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), header=None, dtype=str)
-                df.columns = ["type","code","name","ISIN","start","market","group","CFI"][:df.shape[1]]
-            for _, row in df.iterrows():
-                c = str(row.get("code","")).strip()
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    # 1. 抓取上市清單 (TWSE OpenAPI)
+    try:
+        r_tse = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", headers=headers, timeout=15, verify=False)
+        if r_tse.status_code == 200:
+            for item in r_tse.json():
+                c = str(item.get("公司代號", "")).strip()
                 if re.match(r"^\d{4,6}$", c):
                     meta.append({
-                        "code": c, 
-                        "name": str(row.get("name","")).strip(), 
-                        "industry": str(row.get("group","")).strip() or "未分類",
-                        "market": market
+                        "code": c,
+                        "name": str(item.get("公司簡稱", "")).strip(),
+                        "industry": str(item.get("產業別", "")).strip() or "未分類",
+                        "market": "上市"
                     })
-        except: pass
+    except Exception as e:
+        st.warning(f"上市清單讀取警告: {e}")
+
+    # 2. 抓取上櫃清單 (TPEx OpenAPI)
+    try:
+        r_otc = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", headers=headers, timeout=15, verify=False)
+        if r_otc.status_code == 200:
+            for item in r_otc.json():
+                c = str(item.get("公司代號", "")).strip()
+                if re.match(r"^\d{4,6}$", c):
+                    meta.append({
+                        "code": c,
+                        "name": str(item.get("公司簡稱", "")).strip(),
+                        "industry": str(item.get("產業別", "")).strip() or "未分類",
+                        "market": "上櫃"
+                    })
+    except Exception as e:
+        st.warning(f"上櫃清單讀取警告: {e}")
+
     if not meta:
-        raise ValueError("無法取得股票清單。")
+        raise ValueError("無法取得股票清單（官方 OpenAPI 連線失敗），請確認網路狀態。")
+        
     return pd.DataFrame(meta).drop_duplicates("code").sort_values("code").reset_index(drop=True)
 
 # =========================
-# DAILY BASELINE (解決轉圈圈：threads=False)
+# DAILY BASELINE 
 # =========================
 BASE_COLS = [
     "code", "yday_close", "prev2_close", "limit_class_pct", "vol_ma20_shares",
@@ -172,7 +184,6 @@ def build_daily_baseline(codes: list[str]) -> pd.DataFrame:
         tickers = " ".join([f"{c}.TW" for c in chunk])
 
         try:
-            # 關鍵修正：threads=False 絕對不當機轉圈圈
             raw = yf.download(tickers=tickers, start=start, interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
         except: continue
 
@@ -248,7 +259,7 @@ def build_daily_baseline(codes: list[str]) -> pd.DataFrame:
     return out[BASE_COLS].copy()
 
 # =========================
-# INTRADAY (解決轉圈圈：threads=False)
+# INTRADAY (current day 5m bars)
 # =========================
 def _normalize_intraday_index(df: pd.DataFrame) -> pd.DataFrame:
     idx = df.index
@@ -272,7 +283,6 @@ def fetch_intraday_bars_5m(codes: list[str], batch_size: int = 60) -> dict:
         tickers = " ".join([f"{c}.TW" for c in chunk])
 
         try:
-            # 關鍵修正：threads=False
             raw = yf.download(tickers=tickers, period="1d", interval="5m", group_by="ticker", auto_adjust=False, threads=False, progress=False)
         except: continue
 
@@ -558,10 +568,11 @@ def render_pretty_table(df):
 # =========================
 # SIDEBAR
 # =========================
-st.sidebar.markdown("### 🧠 無腦濾網模式")
+st.sidebar.markdown("### 🧠 懶人設定")
 mode = st.sidebar.selectbox("策略嚴格度", list(PRESETS.keys()), index=1)
 pool_mode = st.sidebar.selectbox("股票池", ["流動性預篩（推薦）", "全上市（很慢）"], index=0)
 st.sidebar.markdown("---")
+run_scan = st.sidebar.button("🧊 立即掃描", use_container_width=True)
 btn_update_bt = st.sidebar.button("📈 更新回測結果", use_container_width=True)
 
 # =========================
@@ -597,10 +608,8 @@ if btn_update_bt:
         st.dataframe(dfb["total_boards"].value_counts().sort_index().rename("出現次數").to_frame(), use_container_width=True)
 
 # =========================
-# 核心大按鈕
+# CORE SCAN EXECUTION
 # =========================
-run_scan = st.button("🚀 一鍵啟動：掃描第一根漲停", use_container_width=True)
-
 if run_scan:
     preset = PRESETS[mode]
     
