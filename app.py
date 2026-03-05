@@ -3,11 +3,40 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="每日飆股自動雷達", page_icon="🎯", layout="wide")
-st.title("🎯 每日飆股自動雷達")
-st.write("一打開網頁，為您自動掃描台股精選 300 檔，找出今天符合「爆量2.5倍 + 突破20日高點 + 實體長紅」的潛力股！")
+# --- 網頁基本設定 (開啟寬螢幕模式) ---
+st.set_page_config(page_title="每日飆股自動雷達", page_icon="🚀", layout="wide")
 
-# --- 1. 內建台股精選高流動性名單 (300多檔) ---
+# --- 自訂 CSS 樣式 (注入美化靈魂) ---
+st.markdown("""
+<style>
+    .main-title {
+        font-size: 48px;
+        font-weight: 900;
+        background: -webkit-linear-gradient(45deg, #ff4b4b, #ff8f00);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        text-align: center;
+        margin-bottom: 0px;
+        padding-top: 20px;
+    }
+    .sub-title {
+        text-align: center;
+        color: #888888;
+        font-size: 18px;
+        margin-bottom: 40px;
+        letter-spacing: 2px;
+    }
+    .stProgress > div > div > div > div {
+        background-color: #ff4b4b; /* 把進度條變成熱血的紅色 */
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- 標題區 ---
+st.markdown('<div class="main-title">🚀 每日飆股戰情室</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">全自動掃描 ｜ 爆量 2.5 倍 ｜ 突破 20 日高點 ｜ 第一根實體長紅</div>', unsafe_allow_html=True)
+
+# --- 1. 內建台股精選高流動性名單 ---
 @st.cache_data 
 def get_all_twse_stocks():
     all_stocks_str = (
@@ -31,25 +60,25 @@ def get_all_twse_stocks():
 stock_list = get_all_twse_stocks()
 
 # --- 2. 核心掃描邏輯 ---
-@st.cache_data(ttl=3600) # 快取 1 小時，如果你1小時內重複開網頁，直接秒秀結果不用重跑
+@st.cache_data(ttl=3600) 
 def scan_market(tickers):
     results = []
     start_date = datetime.today() - timedelta(days=60)
     
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    # 版面佈局：將進度條置中
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        status_text = st.empty()
+        progress_bar = st.progress(0)
     
     for i, ticker in enumerate(tickers):
-        status_text.text(f"🚀 自動雷達掃描中: {ticker} ({i+1}/{len(tickers)})... 請稍候")
+        status_text.markdown(f"<p style='text-align: center; color: #666;'>📡 正在接收市場訊號：掃描 <b>{ticker}</b> ({i+1}/{len(tickers)})</p>", unsafe_allow_html=True)
         progress_bar.progress((i + 1) / len(tickers))
         
         try:
             df = yf.download(f"{ticker}.TW", start=start_date, progress=False)
-            if df.empty or len(df) < 21:
-                continue
-                
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.droplevel(1)
+            if df.empty or len(df) < 21: continue
+            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
                 
             df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
             df['Price_Max20'] = df['Close'].rolling(window=20).max()
@@ -58,44 +87,69 @@ def scan_market(tickers):
             last_row = df.iloc[-1]
             prev_row = df.iloc[-2]
             
-            # 條件 A: 爆量2.5倍
             cond_vol = last_row['Volume'] > (prev_row['Vol_MA20'] * 2.5)
-            # 條件 B: 突破區間高點
             cond_price = last_row['Close'] >= prev_row['Price_Max20']
-            # 條件 C: 實體紅K，漲幅 > 4%
             cond_red_candle = last_row['Daily_Return'] > 0.04
             
             if cond_vol and cond_price and cond_red_candle:
                 results.append({
                     "股票代號": ticker,
-                    "最新收盤價": round(float(last_row['Close']), 2),
-                    "單日漲跌幅(%)": f"{round(float(last_row['Daily_Return']) * 100, 2)}%",
-                    "今日成交量(張)": int(last_row['Volume'] / 1000),
-                    "爆量倍數": round(float(last_row['Volume'] / prev_row['Vol_MA20']), 1)
+                    "最新收盤價": float(last_row['Close']),
+                    "單日漲跌幅": float(last_row['Daily_Return']) * 100,
+                    "今日成交量": int(last_row['Volume'] / 1000),
+                    "爆量倍數": float(last_row['Volume'] / prev_row['Vol_MA20'])
                 })
         except Exception:
             continue
             
-    # 掃描結束清空進度條文字
     status_text.empty() 
     progress_bar.empty()
     return pd.DataFrame(results)
 
-# --- 3. 一開網頁直接自動執行，不要按鈕了！ ---
-with st.spinner("系統正在努力幫您抓取全市場數據，大約需要 30 秒，請稍候..."):
-    # 網頁載入到這裡時，就會自動呼叫 scan_market 函數
+# --- 3. 執行與精美畫面渲染 ---
+with st.spinner(" "): # 隱藏預設 spinner，使用我們自訂的進度條
     scan_results_df = scan_market(stock_list)
     
-    st.subheader("📊 今日符合『爆量突破』條件的股票清單")
-    
     if not scan_results_df.empty:
-        st.dataframe(scan_results_df, use_container_width=True)
-        st.success(f"太棒了！為您抓出了 {len(scan_results_df)} 檔像瑞軒當初起漲的潛力股。")
-    else:
-        st.info("今天市場比較平淡，沒有符合條件的標的喔！")
+        st.success(f"🎯 鎖定目標！今日共發現 **{len(scan_results_df)}** 檔符合起漲型態的潛力股。")
+        st.divider()
+        
+        # 建立美觀的卡片區塊 (每排顯示 3 到 4 張卡片)
+        cols = st.columns(min(len(scan_results_df), 4))
+        
+        for index, row in scan_results_df.iterrows():
+            col = cols[index % len(cols)]
+            with col:
+                # 使用 st.metric 創造卡片感，delta_color="inverse" 會讓正數(上漲)顯示為紅色，符合台股習慣
+                st.metric(
+                    label=f"🔥 代號：{row['股票代號']}", 
+                    value=f"{row['最新收盤價']:.2f}", 
+                    delta=f"漲幅 {row['單日漲跌幅']:.2f}%",
+                    delta_color="inverse"
+                )
+                st.caption(f"成交量: {row['今日成交量']} 張 | 爆量: {row['爆量倍數']:.1f} 倍")
+        
+        st.divider()
+        
+        # 下方保留完整的原始數據表，並將數字格式化得更漂亮
+        st.write("📋 完整數據報表：")
+        st.dataframe(
+            scan_results_df.style.format({
+                "最新收盤價": "{:.2f}",
+                "單日漲跌幅": "{:.2f}%",
+                "今日成交量": "{:,} 張",
+                "爆量倍數": "{:.1f} 倍"
+            }).background_gradient(subset=['單日漲跌幅', '爆量倍數'], cmap='Reds'),
+            use_container_width=True
+        )
 
-# 給你一個手動重新整理的按鈕（如果你等不及快取的1小時，想硬刷新的話）
-st.divider()
-if st.button("🔄 強制重新掃描最新數據"):
-    st.cache_data.clear()
-    st.rerun()
+    else:
+        st.info("📉 今日市場資金動能較弱，沒有符合「爆量第一根」條件的標的，建議多看少做！")
+
+# --- 4. 底部重整按鈕 ---
+st.markdown("<br><br>", unsafe_allow_html=True)
+col1, col2, col3 = st.columns([2, 1, 2])
+with col2:
+    if st.button("🔄 重新掃描最新數據", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
