@@ -261,7 +261,7 @@ def fetch_all_twse_listed_stocks() -> pd.DataFrame:
     out = df[["公司代號", name_col]].rename(columns={"公司代號": "code", name_col: "name"}).copy()
     out["code"] = out["code"].astype(str).str.strip()
     out["name"] = out["name"].astype(str).str.strip()
-    out = out[out["code"].str.match(r"^\d{4,6}$")].drop_duplicates("code").sort_values("code").reset_index(drop=True)
+    out = out[out["code"].str.match(r"^\\d{4,6}$")].drop_duplicates("code").sort_values("code").reset_index(drop=True)
     return out
 
 # =========================
@@ -329,7 +329,6 @@ def build_daily_baselines(codes: list[str]) -> pd.DataFrame:
 
 # =========================
 # Intraday snapshot (yfinance, 5m)
-# ✅ show_spinner=False => no ugly "Running xxx"
 # =========================
 @st.cache_data(ttl=20, show_spinner=False)
 def fetch_intraday_snapshot_yf(codes: list[str], interval: str = "5m", batch_size: int = 30) -> pd.DataFrame:
@@ -363,19 +362,13 @@ def fetch_intraday_snapshot_yf(codes: list[str], interval: str = "5m", batch_siz
                 if df.empty:
                     continue
 
-                day_open = float(df["Open"].iloc[0])
-                day_high = float(df["High"].max())
-                day_low = float(df["Low"].min())
-                last = float(df["Close"].iloc[-1])
-                vol_shares = float(df["Volume"].sum())
-
                 out.append({
                     "code": c,
-                    "last": last,
-                    "open": day_open,
-                    "high": day_high,
-                    "low": day_low,
-                    "vol_lots": int(vol_shares / 1000),
+                    "last": float(df["Close"].iloc[-1]),
+                    "open": float(df["Open"].iloc[0]),
+                    "high": float(df["High"].max()),
+                    "low": float(df["Low"].min()),
+                    "vol_lots": int(float(df["Volume"].sum()) / 1000),
                 })
             except Exception:
                 continue
@@ -388,7 +381,7 @@ def fetch_intraday_snapshot_yf(codes: list[str], interval: str = "5m", batch_siz
     return df.drop_duplicates("code")
 
 # =========================
-# Lazy presets (unchanged logic, simplified UX)
+# Lazy presets
 # =========================
 PRESETS = {
     "保守（少訊號、盡量避雷）": dict(
@@ -483,43 +476,46 @@ def scan_intraday_breakouts(quotes: pd.DataFrame, base: pd.DataFrame, now_ts: da
     if out.empty:
         return out
 
-    out["chg_pct_vs_yday"] = (out["last"] / out["yday_close"] - 1.0) * 100.0
-    out["score"] = (
+    out["較昨收(%)"] = (out["last"] / out["yday_close"] - 1.0) * 100.0
+    out["綜合分數"] = (
         2.0 * out["vol_ratio_now"].clip(0, 10) +
         1.5 * out["close_pos"].clip(0, 1) -
         1.0 * out["upper_shadow_ratio"].clip(0, 1) +
         0.3 * out["body_return"].clip(-1, 1)
     )
-    out = out.sort_values(["score", "vol_ratio_now"], ascending=False)
 
-    show = out[["code","last","chg_pct_vs_yday","vol_lots","vol_ratio_now","high20","breakout_level","score"]].copy()
-    show.rename(columns={
-        "code":"代號","last":"現價","chg_pct_vs_yday":"較昨收(%)","vol_lots":"累積量(張)",
-        "vol_ratio_now":"盤中爆量倍數","high20":"前20日高","breakout_level":"突破門檻","score":"綜合分數"
-    }, inplace=True)
-    return show
+    out = out.sort_values(["綜合分數", "vol_ratio_now"], ascending=False)
+
+    out = out.rename(columns={
+        "code":"代號",
+        "last":"現價",
+        "vol_lots":"累積量(張)",
+        "vol_ratio_now":"盤中爆量倍數",
+        "high20":"前20日高",
+        "breakout_level":"突破門檻",
+    })
+
+    keep = ["代號","現價","較昨收(%)","累積量(張)","盤中爆量倍數","前20日高","突破門檻","綜合分數"]
+    return out[keep].copy()
 
 def render_pretty_table(df: pd.DataFrame) -> None:
-    """
-    Custom dark table (scroll + sticky header)
-    """
     if df.empty:
         st.info("沒有資料。")
         return
 
-    # format for display
     d = df.copy()
-    # ensure numeric formatting
-    def f2(x): 
+
+    def f2(x):
         try: return f"{float(x):,.2f}"
         except: return str(x)
+
     def f0(x):
         try: return f"{int(float(x)):,}"
         except: return str(x)
 
-    html_rows = []
+    rows = []
     for _, r in d.iterrows():
-        html_rows.append(f"""
+        rows.append(f"""
         <tr>
           <td class="center">{r.get('排名','')}</td>
           <td>{r.get('代號','')}</td>
@@ -534,7 +530,7 @@ def render_pretty_table(df: pd.DataFrame) -> None:
         </tr>
         """)
 
-    html = f"""
+    st.markdown(f"""
     <div class="table-wrap">
       <table>
         <thead>
@@ -552,15 +548,14 @@ def render_pretty_table(df: pd.DataFrame) -> None:
           </tr>
         </thead>
         <tbody>
-          {''.join(html_rows)}
+          {''.join(rows)}
         </tbody>
       </table>
     </div>
-    """
-    st.markdown(html, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 # =========================
-# Sidebar (simple)
+# Sidebar
 # =========================
 st.sidebar.markdown("### 🧠 懶人設定")
 preset_name = st.sidebar.selectbox("風險等級", list(PRESETS.keys()), index=1)
@@ -603,7 +598,7 @@ if refresh_base:
     st.success("已清除快取：日線基準 & 盤中快照。")
 
 # =========================
-# Determine universe
+# Universe
 # =========================
 base_df = None
 codes_to_scan = all_codes
@@ -619,7 +614,7 @@ if pool_mode.startswith("流動性預篩"):
 
 p = PRESETS[preset_name]
 
-# Dashboard cards (pre-scan)
+# Pre-scan cards
 st.markdown(f"""
 <div class="grid">
   <div class="card"><div class="k">股票池</div><div class="v">{universe_label}</div></div>
@@ -669,30 +664,30 @@ if run_scan:
     if found == 0:
         st.warning("目前沒有符合條件的第一根。你可以改成「積極」再掃一次（會更容易出訊號）。")
     else:
-        # Add name + rank
         result = result.copy()
         result["名稱"] = result["代號"].map(name_map).fillna("")
         result.insert(0, "排名", range(1, len(result) + 1))
 
         st.success(f"🧊 今日此刻掃到 {found} 檔符合『第一根』的候選標的")
 
-        # TOP 12 cards
+        # TOP 12 cards (✅ use iterrows, no special column name bug)
         topn = result.head(12).copy()
-        cols = st.columns(4)
+        q75 = float(topn["綜合分數"].quantile(0.75))
 
-        for i, row in enumerate(topn.itertuples(index=False), start=1):
+        cols = st.columns(4)
+        for i, (_, r) in enumerate(topn.iterrows(), start=1):
             c = cols[(i - 1) % 4]
             with c:
-                score = float(getattr(row, "綜合分數"))
-                tag = "🔥 強" if score >= topn["綜合分數"].quantile(0.75) else "✅ 可看"
+                score = float(r["綜合分數"])
+                tag = "🔥 強" if score >= q75 else "✅ 可看"
 
-                code = getattr(row, "代號")
-                name = getattr(row, "名稱") or ""
-                price = float(getattr(row, "現價"))
-                chg = float(getattr(row, "較昨收(%)"))
-                lots = int(getattr(row, "累積量(張)"))
-                volx = float(getattr(row, "盤中爆量倍數"))
-                brk = float(getattr(row, "突破門檻"))
+                code = str(r["代號"])
+                name = str(r["名稱"]) if pd.notna(r["名稱"]) else ""
+                price = float(r["現價"])
+                chg = float(r["較昨收(%)"])
+                lots = int(float(r["累積量(張)"]))
+                volx = float(r["盤中爆量倍數"])
+                brk = float(r["突破門檻"])
 
                 st.markdown(f"""
 <div class="card">
