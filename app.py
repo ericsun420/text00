@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 7.4 隱形迷彩版｜動態偽裝防封鎖｜Ultra Pro 旗艦
+# app.py — 起漲戰情室｜戰神 7.5 網路正骨版｜Session 隔離｜精準 Headers｜Ultra Pro
 import io
 import math
 import time
@@ -14,7 +14,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
-# 隱藏 SSL 警告，保持版面乾淨
+# 隱藏 SSL 警告，保持版面乾淨 (僅針對 MIS)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
@@ -34,17 +34,17 @@ def diag_init():
 def diag_err(diag, e, tag="ERR"):
     diag["last_errors"].append(f"[{tag}] {type(e).__name__}: {e}")
 
-def make_retry_session():
-    s = requests.Session()
-    # 增加 backoff_factor 讓重試的間隔稍微拉長，避免被視為 DDoS
-    retry = Retry(total=3, backoff_factor=0.5, status_forcelist=(403, 429, 500, 502, 503, 504), allowed_methods=("GET",), respect_retry_after_header=True)
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
+# ✅ 修正 1：GitHub 專用乾淨 Headers
+def get_github_headers():
+    return {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/csv,text/plain,*/*",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "keep-alive",
+    }
 
-# ✅ 新增：隱形迷彩 (隨機生成瀏覽器標頭，假裝是真人在看網頁)
-def get_stealth_headers():
+# ✅ 修正 2：MIS 專用 Headers (保持偽裝，但不跨域污染)
+def get_mis_headers():
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
@@ -59,6 +59,18 @@ def get_stealth_headers():
         "Connection": "keep-alive",
         "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"
     }
+
+# ✅ 修正 3：Session 層級綁定 Headers，並移除 403 挑釁重試
+def make_retry_session(base_headers=None):
+    s = requests.Session()
+    # 移除 403，403 代表硬拒絕，不要硬衝
+    retry = Retry(total=3, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",), respect_retry_after_header=True)
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    if base_headers:
+        s.headers.update(base_headers) # ✅ Session 建立時就鎖定一套身份
+    return s
 
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def yf_download_daily(syms):
@@ -155,12 +167,13 @@ def split_nums(s):
 # =========================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
-    meta, session = {}, make_retry_session()
+    # ✅ 修正 4：GitHub 使用乾淨 Headers，且恢復 SSL 驗證 (verify=True)
+    meta, session = {}, make_retry_session(base_headers=get_github_headers())
     urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
             ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
         try:
-            r = session.get(url, timeout=15, verify=False, headers=get_stealth_headers()); r.raise_for_status()
+            r = session.get(url, timeout=15, verify=True); r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
             c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
@@ -173,10 +186,12 @@ def get_stock_list():
     return meta
 
 def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
-    session, rows, err_mis = make_retry_session(), [], 0
+    # ✅ 修正 5：建立 MIS 專用 Session，綁定一致身份，不重複重骰 UA
+    session, rows, err_mis = make_retry_session(base_headers=get_mis_headers()), [], 0
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=get_stealth_headers(), timeout=10, verify=False)
+    # 針對 MIS 保留 verify=False 以免遇到證交所憑證問題
+    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=10, verify=False)
     except Exception as e: diag_err(diag, e, "MIS_WARMUP")
 
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
@@ -191,11 +206,10 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
         status_placeholder.update(label=f"📡 穿透雷達掃描中... ({i}/{len(codes)})", state="running")
         try:
-            # 套用動態偽裝 Header
-            r = session.get(url, headers=get_stealth_headers(), timeout=12, verify=False)
+            r = session.get(url, timeout=12, verify=False)
             data = r.json().get("msgArray", [])
         except:
-            err_mis += 1; mis_diag["mis_req_err"] += 1; time.sleep(0.2); continue
+            err_mis += 1; mis_diag["mis_req_err"] += 1; time.sleep(0.1); continue
 
         for q in data:
             mis_diag["mis_seen"] += 1
@@ -218,7 +232,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                         "best_bid": bp[0] if bp else 0.0, "bid_sh1": bv[0] if bv else 0.0
                     })
             except: mis_diag["mis_parse_fail"] += 1
-        time.sleep(0.15 if not is_test else 0.02) # 稍微加長一點休息時間，避免觸發防護
+        time.sleep(0.12 if not is_test else 0.01)
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -254,7 +268,8 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 
     try:
         raw_daily = yf_download_daily(syms)
-        if raw_daily is None or getattr(raw_daily, "empty", False): raise Exception("YF_BULK_EMPTY")
+        if raw_daily is None or getattr(raw_daily, "empty", False):
+            raise Exception("YF_BULK_EMPTY")
         diag["yf_rescue_used"] = 0 
     except Exception as e:
         tag = "YF_BULK_EMPTY" if str(e) == "YF_BULK_EMPTY" else "YF_BULK_FAIL"
@@ -370,7 +385,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # MAIN
 # =========================
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v7.4 隱形迷彩版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v7.5 網路正骨版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
@@ -441,6 +456,6 @@ if scan:
                 </div>""", unsafe_allow_html=True)
     else: 
         if d.get("mis_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)。如果您部署在雲端平台 (如 Streamlit Cloud)，請嘗試在本地端 (Local) 電腦執行。")
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)，請確認執行環境。")
         else:
             st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
