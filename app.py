@@ -2,11 +2,14 @@ import time
 import re
 from datetime import datetime, timedelta, time as dtime
 
-import certifi
 import requests
+import urllib3
 import pandas as pd
 import yfinance as yf
 import streamlit as st
+
+# 如果你環境被迫用 verify=False（最後手段），把 warning 關掉
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
 # 基本設定
@@ -39,7 +42,7 @@ st.markdown("""
 <b>💡 用法：</b><br>
 1) 建議 13:15～13:25 掃描（靠近收盤，型態更接近今日定型）<br>
 2) 第一次跑「全上市」會比較久（要建日線基準快取）；之後會快很多<br>
-<span class="small-note">盤中即時：TWSE MIS；股票清單：TWSE OpenAPI；日線基準：yfinance。</span>
+<span class="small-note">上市清單：MOPS CSV（HTTP）；盤中即時：MIS（HTTP）；日線基準：yfinance。</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -59,49 +62,56 @@ def minutes_elapsed_in_session(ts: datetime) -> int:
     return int((ts - start).total_seconds() // 60)
 
 # =========================
-# HTTP helpers（避免你環境 CA 出事）
+# HTTP Helper：優先 HTTP，必要時才 verify=False 硬過 HTTPS
 # =========================
-def get_json(url: str, timeout: int = 30) -> list | dict:
-    # 先用系統預設驗證；若遇到憑證/CA問題，改用 certifi 的 CA bundle 再試一次
+def http_get(url: str, *, timeout: int = 30, as_text: bool = True):
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get(url, headers=headers, timeout=timeout)
+        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
         r.raise_for_status()
-        return r.json()
+        return r.text if as_text else r.content
     except requests.exceptions.SSLError:
-        r = requests.get(url, headers=headers, timeout=timeout, verify=certifi.where())
+        # 最後手段：你環境的 TWSE TLS 驗證有問題時，硬過（不安全，只建議在可信網路）
+        r = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True, verify=False)
         r.raise_for_status()
-        return r.json()
+        return r.text if as_text else r.content
 
 # =========================
-# 1) 抓「全上市公司代號清單」（TWSE OpenAPI）
+# 1) 抓「全上市公司代號清單」（MOPS CSV：HTTP）
 # =========================
 @st.cache_data(ttl=24 * 3600)
 def fetch_all_twse_listed_stocks() -> pd.DataFrame:
     """
-    用 TWSE OpenAPI 取得「上市公司基本資料」：公司代號/公司簡稱
-    https://openapi.twse.com.tw/v1/opendata/t187ap03_L
+    上市公司基本資料（CSV）
+    優先用 HTTP：http://mopsfin.twse.com.tw/opendata/t187ap03_L.csv
     """
-    url = "https://openapi.twse.com.tw/v1/opendata/t187ap03_L"
-    data = get_json(url)
+    url = "http://mopsfin.twse.com.tw/opendata/t187ap03_L.csv"
+    csv_text = http_get(url, timeout=40, as_text=True)
 
-    df = pd.DataFrame(data)
-    # 欄位：公司代號、公司簡稱（OpenAPI 回傳）
-    df = df.rename(columns={"公司代號": "code", "公司簡稱": "name"})
+    # pandas 直接讀字串
+    from io import StringIO
+    df = pd.read_csv(StringIO(csv_text), dtype=str)
 
-    # 保留常見股票代號格式（4碼為主；有些會到 5~6碼）
-    df["code"] = df["code"].astype(str).str.strip()
-    df["name"] = df["name"].astype(str).str.strip()
+    # 常見欄位：公司代號 / 公司簡稱（有時也會有 公司名稱）
+    # 保底：若欄名有些差異，做容錯
+    col_code = "公司代號" if "公司代號" in df.columns else None
+    col_name = "公司簡稱" if "公司簡稱" in df.columns else ("公司名稱" if "公司名稱" in df.columns else None)
+    if col_code is None or col_name is None:
+        raise ValueError(f"CSV 欄位不符合預期，拿到的欄位：{list(df.columns)}")
 
-    df = df[df["code"].str.match(r"^\d{4,6}$")].copy()
-    df = df[["code", "name"]].drop_duplicates("code").sort_values("code").reset_index(drop=True)
-    return df
+    out = df[[col_code, col_name]].rename(columns={col_code: "code", col_name: "name"}).copy()
+    out["code"] = out["code"].astype(str).str.strip()
+    out["name"] = out["name"].astype(str).str.strip()
+
+    # 保留股票代號格式（一般 4 碼；少數 5~6 碼）
+    out = out[out["code"].str.match(r"^\d{4,6}$")].drop_duplicates("code").sort_values("code").reset_index(drop=True)
+    return out
 
 # =========================
-# 2) 盤中即時：TWSE MIS getStockInfo（支援 | 批次）
+# 2) 盤中即時：TWSE MIS getStockInfo（HTTP）
 # =========================
-SESSION_URL = "https://mis.twse.com.tw/stock/index.jsp"
-QUOTE_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
+SESSION_URL = "http://mis.twse.com.tw/stock/index.jsp"
+QUOTE_URL   = "http://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 
 def _safe_float(x):
     try:
@@ -121,9 +131,7 @@ def _safe_int(x):
 
 def fetch_realtime_quotes_twse(codes: list[str], batch_size: int = 120) -> pd.DataFrame:
     """
-    回傳欄位：
-    code, name, last, open, high, low, prev_close, vol_lots, tlong
-    vol_lots：MIS v 常見為「累積成交量（張）」
+    vol_lots：MIS v 常見為累積成交量（張）
     """
     s = requests.Session()
     s.get(SESSION_URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
@@ -142,8 +150,15 @@ def fetch_realtime_quotes_twse(codes: list[str], batch_size: int = 120) -> pd.Da
             "_": str(int(time.time() * 1000)),
         }
 
-        resp = s.get(QUOTE_URL, params=params, headers=headers, timeout=25)
-        data = resp.json()
+        try:
+            resp = s.get(QUOTE_URL, params=params, headers=headers, timeout=25)
+            data = resp.json()
+        except requests.exceptions.SSLError:
+            # 最後手段：如果你的網路把 HTTP 轉 HTTPS 又爆 TLS，就硬過
+            resp = s.get(QUOTE_URL.replace("http://", "https://"), params=params, headers=headers, timeout=25, verify=False)
+            data = resp.json()
+        except Exception:
+            continue
 
         if data.get("rtcode") != "0000":
             continue
@@ -214,9 +229,8 @@ def build_daily_baselines(codes: list[str]) -> pd.DataFrame:
                     continue
 
                 vol_ma20 = df["Volume"].rolling(20).mean().iloc[-1]
-                high20 = df["High"].rolling(20).max().shift(1).iloc[-1]  # 排除今天
+                high20 = df["High"].rolling(20).max().shift(1).iloc[-1]
                 ma60 = df["Close"].rolling(60).mean().iloc[-1]
-
                 yday_vol = df["Volume"].iloc[-1]
                 yday_close = df["Close"].iloc[-1]
 
@@ -274,7 +288,7 @@ def scan_intraday_breakouts(
     df["close_pos"] = (df["last"] - df["low"]) / rng
     df["cond_close_pos"] = df["close_pos"] >= close_pos_min
 
-    # 上影線比例（正確算法：High - max(Open, Last)）
+    # 上影線比例（High - max(Open, Last)）
     df["real_body_top"] = df[["open", "last"]].max(axis=1)
     df["upper_shadow_ratio"] = (df["high"] - df["real_body_top"]) / rng
     df["cond_shadow"] = df["upper_shadow_ratio"] <= upper_shadow_max
@@ -333,7 +347,6 @@ def scan_intraday_breakouts(
 
     out["chg_pct_vs_yday"] = (out["last"] / out["yday_close"] - 1.0) * 100.0
 
-    # 簡單排序分數（你可再調權重）
     out["score"] = (
         2.0 * out["vol_ratio_now"].clip(0, 10) +
         1.5 * out["close_pos"].clip(0, 1) -
@@ -414,7 +427,7 @@ except Exception as e:
     st.stop()
 
 all_codes = stock_df["code"].tolist()
-st.caption(f"已載入上市公司數：{len(all_codes)} 檔（來源：TWSE OpenAPI）")
+st.caption(f"已載入上市公司數：{len(all_codes)} 檔（來源：MOPS t187ap03_L.csv）")
 
 if refresh_base:
     build_daily_baselines.clear()
@@ -423,7 +436,6 @@ if refresh_base:
 now_ts = now_taipei()
 st.write(f"🕒 台北時間：**{now_ts.strftime('%Y-%m-%d %H:%M:%S')}**｜已過盤中分鐘：**{minutes_elapsed_in_session(now_ts)} / 270**")
 
-# 股票池：全上市 or 預篩
 base_df = None
 codes_to_scan = all_codes
 
@@ -431,19 +443,16 @@ if universe_mode == "流動性預篩（更快）":
     with st.spinner("建立日線基準（用於預篩與指標）..."):
         base_df = build_daily_baselines(all_codes)
 
-    # 預篩門檻：20日均量（股） >= 500,000（= 500 張/日）
-    liq_threshold_shares = 500_000
+    liq_threshold_shares = 500_000  # 500 張/日
     kept = base_df[base_df["vol_ma20_shares"] >= liq_threshold_shares]["code"].tolist()
     codes_to_scan = kept
     st.info(f"流動性預篩：保留 {len(codes_to_scan)} 檔（20日均量≥{liq_threshold_shares/1000:.0f} 張/日）")
 
 if run_scan:
-    # 1) 日線基準（必要）
     with st.spinner("取得日線基準（MA/20日高/均量/過熱/昨日爆量）..."):
         if base_df is None:
             base_df = build_daily_baselines(codes_to_scan)
 
-    # 2) 盤中即時（MIS 批次）
     prog = st.progress(0, text="抓取盤中即時報價（分批）...")
     batch = 120
     quotes_parts = []
@@ -467,7 +476,6 @@ if run_scan:
 
     quotes_df = pd.concat(quotes_parts, ignore_index=True)
 
-    # 3) 掃描
     with st.spinner("運算突破/爆量/避雷條件..."):
         result = scan_intraday_breakouts(
             quotes_df,
@@ -508,4 +516,4 @@ if run_scan:
             height=560
         )
 
-st.caption("資料來源：上市清單（TWSE OpenAPI t187ap03_L）；盤中即時（TWSE MIS getStockInfo）。")
+st.caption("資料來源：上市清單（MOPS t187ap03_L.csv, HTTP）；盤中即時（MIS getStockInfo.jsp, HTTP）。")
