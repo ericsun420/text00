@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神修正版 3.2｜1~N 根連板通吃｜一字板與資料同步優化
+# app.py — 起漲戰情室｜戰神修正版 3.3｜1~N 根連板通吃｜精準漲停與連線穩定優化
 import io
 import math
 import time
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="起漲戰情室｜戰神修正版 3.2", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室｜戰神修正版 3.3", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
@@ -62,10 +62,13 @@ def tw_tick(price):
     if price < 1000: return 1.00
     return 5.00
 
+# 【核心修正 1】: 漲停價向下取整到 Tick，絕對不超標
 def calc_limit_up(prev_close, limit_pct=0.10):
     raw = prev_close * (1.0 + limit_pct)
     tick = tw_tick(raw)
-    return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
+    n = math.floor((raw + 1e-12) / tick)
+    price = n * tick
+    return round(price, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 def split_nums(s):
     out = []
@@ -106,11 +109,17 @@ def get_stock_list():
     return meta
 
 # =========================
-# ENGINE 2: MIS 盤中快篩
+# ENGINE 2: MIS 盤中快篩 (Headers 優化)
 # =========================
 def fast_mis_scan(meta_dict, status_placeholder):
+    # 【核心修正 2】: 補上模擬真人的 Headers
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
+        "Accept": "application/json,text/plain,*/*",
+    }
     s = requests.Session()
-    try: s.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=15, verify=False)
+    try: s.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=headers, timeout=15, verify=False)
     except: pass
     
     codes = list(meta_dict.keys())
@@ -125,7 +134,7 @@ def fast_mis_scan(meta_dict, status_placeholder):
         status_placeholder.update(label=f"📡 MIS 盤中快篩中 ({i//batch_size + 1}/{total_batches})...", state="running")
         
         try:
-            r = s.get(url, timeout=12, verify=False)
+            r = s.get(url, headers=headers, timeout=12, verify=False)
             data = r.json().get("msgArray", [])
             for q in data:
                 c = q.get("c")
@@ -135,7 +144,9 @@ def fast_mis_scan(meta_dict, status_placeholder):
                 
                 last, upper, prev_close = float(z), float(u), float(y)
                 vol_lots = int(float(v or 0) / 1000)
-                dist_pct = ((upper - last) / upper) * 100
+                
+                # 【核心修正 4】: 避免資料不同步造成距離為負
+                dist_pct = max(0.0, ((upper - last) / upper) * 100)
                 
                 if vol_lots >= 800 and dist_pct <= 3.1:
                     bp, bv, ap, av = split_nums(q.get("b")), split_nums(q.get("g")), split_nums(q.get("a")), split_nums(q.get("f"))
@@ -152,7 +163,7 @@ def fast_mis_scan(meta_dict, status_placeholder):
     return pd.DataFrame(rows)
 
 # =========================
-# ENGINE 3: 核心濾網 (3.2 升級版)
+# ENGINE 3: 核心濾網
 # =========================
 def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if candidates_df.empty: return pd.DataFrame()
@@ -178,18 +189,17 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             if len(dfD) < 30: 
                 stats["YF_Fail"] += 1; continue
 
-            # 日線資料準備
             has_today = dfD.index[-1].date() == today_date
             past_df = dfD.iloc[:-1].copy() if has_today else dfD.copy()
             
-            # 【核心修正 2】: 一字板數學校護 (high==low 處理)
+            # 一字板數學校護
             rng_raw = r["high"] - r["low"]
             if rng_raw <= 2 * tw_tick(r["upper"]):
-                close_pos = 1.0 # 強勢一字板或極窄震盪，直接給滿分
+                close_pos = 1.0
             else:
                 close_pos = (r["last"] - r["low"]) / rng_raw
 
-            # 連板判斷 (逼近法)
+            # 逼近法判斷制度與連板
             past_boards = 0
             if len(past_df) >= 10:
                 past_10 = past_df.tail(10)
@@ -208,7 +218,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             elif past_boards == 2: stage_label, stage_class, stage_bonus = "⚠️ 第三連", "tag-stage3", -5.0
             else: stage_label, stage_class, stage_bonus = f"💀 第{past_boards+1}連", "tag-stage4", -15.0
 
-            # Hype 排除 (僅尋找第一根時啟用)
+            # Hype 排除 (只有第一根才排除近 10 日漲停股)
             if past_boards == 0:
                 had_limit_past = False
                 for j in range(len(past_df)-1, max(1, len(past_df)-10), -1):
@@ -220,12 +230,10 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                     if cp_j >= (lim_j - tw_tick(lim_j)): had_limit_past = True; break
                 if had_limit_past: stats["Hype"] += 1; continue
 
-            # 【核心修正 1】: 鎖死判定降級處理 (處理 MIS 非同步)
+            # 【核心修正 3】: 鎖死判定與異常賣量防禦
             bid_lots1 = int(r["bid_v1"]/1000)
             ask_lots1 = int(r["ask_v1"]/1000)
             has_ask = r["ask_p1"] > 0
-            
-            # 標記賣量是否不可信
             ask_vol_unknown = has_ask and (r["ask_v1"] <= 0)
 
             is_locked = (r["bid_p1"] >= r["upper"] - tw_tick(r["upper"])) and (bid_lots1 >= 200)
@@ -235,12 +243,11 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                 if not ask_at_upper: 
                     is_locked = False
                 elif not ask_vol_unknown:
-                    # 只有在賣量可信時，才套用比例門檻
                     if ask_lots1 > max(150, bid_lots1 * 0.6): is_locked = False
             
             if not is_locked: stats["NotLocked"] += 1
 
-            # 【核心修正 3】: 分母安全檢查 (vol_ma20_lots 守衛)
+            # 分母安全檢查
             vol_ma20_lots = float(dfD["Volume"].rolling(20).mean().iloc[-1]) / 1000
             if not (vol_ma20_lots > 0):
                 stats["YF_Fail"] += 1; continue
@@ -248,7 +255,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             vol_ratio = r["vol_lots"] / (vol_ma20_lots * frac + 1e-9)
             if vol_ratio < 1.3: stats["VolRatio"] += 1; continue
 
-            # 瑞軒型一致性濾網 (Pullback 與 ClosePos)
+            # 瑞軒型一致性濾網
             pullback = (r["high"] - r["last"]) / max(1e-9, r["high"])
             if pullback > 0.0039: stats["Pullback"] += 1; continue
             if close_pos < 0.80: stats["WeakClose"] += 1; continue
@@ -262,7 +269,8 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                 "代號": c, "名稱": meta_dict[c]["name"], "族群": meta_dict[c]["ind"],
                 "現價": r["last"], "距離(%)": r["dist"], "較昨收(%)": ((r["last"]/r["prev_close"])-1)*100, 
                 "累積量": r["vol_lots"], "爆量x": vol_ratio, "狀態": "鎖死" if is_locked else "未鎖", 
-                "買一": bid_lots1, "賣一": ask_lots1 if not ask_vol_unknown else "未知", 
+                "買一": bid_lots1, "賣一(張)": ask_lots1 if not ask_vol_unknown else 0,
+                "賣一狀態": "正常" if not ask_vol_unknown else "未知",
                 "連板序號": past_boards + 1, "潛力分": max(0.0, min(100.0, score)),
                 "階段": stage_label, "Class": stage_class
             })
@@ -276,7 +284,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 # MAIN APP
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">戰神修正版 3.2 ｜ 解放一字板飆股 ｜ MIS 即時品質同步</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">戰神修正版 3.3 ｜ 精準向下取整漲停價 ｜ 穩定 MIS 連線</div>', unsafe_allow_html=True)
 
 run_scan = st.button("🚀 啟動掃描 (自動鎖定強勢先機)", use_container_width=True)
 
@@ -311,7 +319,7 @@ if run_scan:
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af; margin-top:6px;">
                         <span>潛力分: <b style="color:#a3e635;">{r['潛力分']:.1f}</b></span>
-                        <span>買/賣: <b>{r['買一']}/{r['賣一']}</b></span>
+                        <span>買/賣: <b>{r['買一']}/{r['賣一(張)']}</b></span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
