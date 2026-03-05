@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神修正版 3.9｜淘汰名單透明化｜KeyError 徹底修復
+# app.py — 起漲戰情室｜戰神 4.0｜Apple Pro 極簡美學｜1~N 根連板通吃
 import io
 import math
 import time
@@ -13,27 +13,75 @@ import streamlit as st
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
-# UI / THEME
+# UI / THEME (Apple Style)
 # =========================
-st.set_page_config(page_title="起漲戰情室｜戰神 3.9", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
+# 注入 Apple Pro 視覺語法
 st.markdown("""
 <style>
-:root{ --bg:#07080b; --card:#0f1116; --text:#e5e7eb; --muted:#9ca3af; --line:rgba(148,163,184,.16); --shadow: 0 16px 40px rgba(0,0,0,.35); }
-[data-testid="stAppViewContainer"], .main{ background: var(--bg) !important; color: var(--text) !important; }
-.block-container{ padding-top: 2rem; max-width: 1200px; }
-[data-testid="stSidebar"] { display: none !important; }
-.title{ font-size: 42px; font-weight: 900; background: linear-gradient(90deg, #f3f4f6, #9ca3af); -webkit-background-clip:text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 20px;}
-.card{ background: linear-gradient(180deg, rgba(15,17,22,.94), rgba(11,13,18,.94)); border:1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 12px; }
-.metric .code{ color: var(--text); font-size: 20px; font-weight: 900; }
-.metric .price{ font-size: 26px; font-weight: 900; color: var(--text); }
-.stButton>button{ border-radius: 16px !important; background: linear-gradient(90deg, #1f2937, #111827) !important; color: white !important; font-weight: 900 !important; font-size: 20px !important; padding: 25px !important; width: 100%; }
-.fail-item { background: rgba(251, 113, 133, 0.05); border: 1px solid rgba(251, 113, 133, 0.2); padding: 10px; border-radius: 8px; margin-bottom: 5px; }
+    /* 全局背景：深邃黑色漸層 */
+    [data-testid="stAppViewContainer"] {
+        background: radial-gradient(circle at top right, #1c1c1e, #000000) !important;
+        color: #f5f5f7 !important;
+    }
+    .block-container { padding-top: 2rem; max-width: 1200px; }
+    [data-testid="stSidebar"] { display: none !important; }
+
+    /* 標題與字體 */
+    .title { font-size: 52px; font-weight: 800; letter-spacing: -1.5px; background: linear-gradient(180deg, #ffffff 0%, #a1a1a6 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
+    .subtitle { color: #86868b; font-size: 18px; text-align: center; margin-bottom: 40px; font-weight: 400; }
+
+    /* Apple Pro 卡片：毛玻璃效果 */
+    .pro-card {
+        background: rgba(28, 28, 30, 0.7);
+        backdrop-filter: blur(20px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 24px;
+        padding: 24px;
+        margin-bottom: 16px;
+        transition: transform 0.3s ease;
+    }
+    .pro-card:hover { transform: translateY(-5px); border: 1px solid rgba(0, 122, 255, 0.5); }
+
+    /* 指標樣式 */
+    .code-label { font-size: 14px; color: #0a84ff; font-weight: 600; text-transform: uppercase; margin-bottom: 4px; }
+    .stock-name { font-size: 22px; font-weight: 700; color: #ffffff; }
+    .price-large { font-size: 32px; font-weight: 700; color: #ffffff; font-variant-numeric: tabular-nums; }
+    
+    /* 階段標籤 */
+    .tag-pro { padding: 4px 12px; border-radius: 8px; font-size: 12px; font-weight: 700; display: inline-block; margin-bottom: 12px; }
+    .tag-rise { background: rgba(0, 122, 255, 0.15); color: #0a84ff; border: 1px solid rgba(0, 122, 255, 0.3); }
+
+    /* 淘汰名單 Tags */
+    .fail-tag {
+        display: inline-block;
+        padding: 4px 10px;
+        background: rgba(255, 69, 58, 0.1);
+        color: #ff453a;
+        border-radius: 6px;
+        margin: 3px;
+        font-size: 12px;
+        border: 1px solid rgba(255, 69, 58, 0.2);
+    }
+
+    /* 按鈕優化 */
+    .stButton>button {
+        border-radius: 14px !important;
+        background: #ffffff !important;
+        color: #000000 !important;
+        font-weight: 700 !important;
+        font-size: 18px !important;
+        padding: 18px !important;
+        border: none !important;
+        width: 100% !important;
+        box-shadow: 0 4px 20px rgba(255,255,255,0.15);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # =========================
-# HELPERS
+# CORE LOGIC (精準算法繼承)
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 
@@ -56,17 +104,12 @@ def calc_limit_up(prev_close, limit_pct=0.10):
     return round(price, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 def split_nums(s):
-    out = []
-    for x in str(s or "").split("_"):
-        try:
-            if x and x not in ("-", "—", ""): out.append(float(x))
-        except: pass
-    return out
+    return [float(x) for x in str(s or "").split("_") if x and x not in ("-", "—", "")]
 
 # =========================
-# ENGINE 1: 股票清單
+# ENGINE (已加固)
 # =========================
-@st.cache_data(ttl=24*3600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
     meta = {}
     urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
@@ -82,13 +125,10 @@ def get_stock_list():
                 if len(code) == 4 and code.isdigit():
                     if t_col and ("權證" in str(row[t_col]) or "ETF" in str(row[t_col])): continue
                     ind = str(row[g_col]).strip() if g_col and pd.notna(row[g_col]) else "未分類"
-                    meta[code] = {"name": str(row[n_col]) if n_col else "未知", "ind": ind, "ex": ex}
+                    meta[code] = {"name": str(row[n_col]), "ind": ind, "ex": ex}
         except: pass
     return meta
 
-# =========================
-# ENGINE 2: MIS 盤中快篩
-# =========================
 def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test):
     headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"}
     s = requests.Session()
@@ -103,7 +143,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test):
         chunk = codes[i:i+batch_size]
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
-        status_placeholder.update(label=f"📡 掃描中 ({i//batch_size + 1}/{math.ceil(len(codes)/batch_size)})...", state="running")
+        status_placeholder.update(label=f"📡 正在快篩全市場標的...", state="running")
         try:
             r = s.get(url, headers=headers, timeout=12, verify=False)
             for q in r.json().get("msgArray", []):
@@ -119,15 +159,11 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test):
         except: err_mis += 1
     return pd.DataFrame(rows), err_mis
 
-# =========================
-# ENGINE 3: 核心濾網 (修復 KeyError 並強化透明度)
-# =========================
 def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder, mis_err, is_test):
-    # 【核心防爆】：初始化完整的 stats 結構，確保 return 絕對不會缺 key
     stats = {
-        "Total": 0, "爆量不足(VolRatio)": [], "回落過大(Pullback)": [], 
-        "收盤太弱(WeakClose)": [], "過熱排除(Hype)": [], "未鎖死(NotLocked)": [],
-        "YF連線失敗": 0, "其他錯誤": 0, "MIS_Err": mis_err
+        "Total": 0, "爆量不足": [], "回落過大": [], 
+        "收盤太弱": [], "過熱排除": [], "未鎖死": [],
+        "YF連線失敗": 0, "MIS_Err": mis_err
     }
     if candidates_df.empty: return pd.DataFrame(), stats
     
@@ -150,85 +186,94 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder, mis
         try:
             dfD = raw_daily[sym].dropna() if isinstance(raw_daily.columns, pd.MultiIndex) else raw_daily.dropna()
             if len(dfD) < 30: stats["YF連線失敗"] += 1; continue
-            
             has_today = dfD.index[-1].date() == today_date
             past_df = dfD.iloc[:-1].copy() if has_today else dfD.copy()
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
             
-            # 連板計算 (逼近法)
             past_boards = 0
             past_10 = past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp, hp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1]), float(past_10["High"].iloc[i])
                 l10, l20 = calc_limit_up(pp, 0.10), calc_limit_up(pp, 0.20)
-                tol = max(2 * tw_tick(l20), l20 * 0.001)
-                daily_lim = l20 if (abs(cp-l20)<abs(cp-l10) and abs(cp-l20)<=tol) else l10
+                daily_lim = l20 if (abs(cp-l20)<abs(cp-l10) and abs(cp-l20)<=max(2*tw_tick(l20),l20*0.001)) else l10
                 if cp >= (daily_lim - tw_tick(daily_lim)): past_boards += 1
                 else: break
 
-            # 鎖死判定
+            # 鎖死
             min_bid = 80_000 if r["last"] < 50 else 120_000 if r["last"] < 100 else 200_000
             is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= min_bid)
-            if not is_locked: stats["未鎖死(NotLocked)"].append(label)
+            if not is_locked: stats["未鎖死"].append(label)
 
-            # 爆量倍數 (關鍵淘汰點)
+            # 爆量
             vol_ratio = r["vol_sh"] / (vol_ma20_sh * frac + 1e-9)
-            if vol_ratio < v_ratio_lim:
-                stats["爆量不足(VolRatio)"].append(label); continue
+            if vol_ratio < v_ratio_lim: stats["爆量不足"].append(label); continue
 
-            # 資金一致性
+            # 一致性
             rng_raw = r["high"] - r["low"]
             close_pos = 1.0 if rng_raw <= 2 * tw_tick(r["upper"]) else (r["last"] - r["low"]) / rng_raw
             pullback = (r["high"] - r["last"]) / max(1e-9, r["high"])
-            
-            if pullback > pb_lim:
-                stats["回落過大(Pullback)"].append(label); continue
-            if close_pos < cp_lim:
-                stats["收盤太弱(WeakClose)"].append(label); continue
+            if pullback > pb_lim: stats["回落過大"].append(label); continue
+            if close_pos < cp_lim: stats["收盤太弱"].append(label); continue
 
-            results.append({"代號": c, "名稱": name, "現價": r["last"], "距離(%)": r["dist"], "張數": int(r["vol_sh"]/1000), "爆量x": vol_ratio, "狀態": "鎖死" if is_locked else "未鎖", "階段": f"第{past_boards+1}連"})
-        except: stats["其他錯誤"] += 1
+            results.append({"代號": c, "名稱": name, "現價": r["last"], "距離(%)": r["dist"], "張數": int(r["vol_sh"]/1000), "爆量x": vol_ratio, "狀態": "🔒 已鎖" if is_locked else "⚡ 發動", "階段": f"連續 {past_boards+1} 板"})
+        except: pass
     return pd.DataFrame(results), stats
 
 # =========================
 # MAIN APP
 # =========================
-st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-is_test = st.checkbox("🔥 **測試模式 (勾選後將放寬門檻，現在立刻抓出標的)**", value=False)
+st.markdown('<div class="title">WarRoom Pro</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">起漲戰情室 ｜ 精準、極簡、秒級追蹤 </div>', unsafe_allow_html=True)
 
-if st.button("🚀 啟動全市場秒級偵測", use_container_width=True):
+# Apple Style Switch
+cols_ui = st.columns([1, 1, 1])
+with cols_ui[1]:
+    is_test = st.toggle("🔥 測試模式 (盤後覆盤專用)", value=False)
+
+if st.button("🚀 啟動全市場秒級掃描"):
     now_ts = now_taipei()
-    with st.status("⚡ 戰情室運作中...", expanded=True) as status:
+    with st.status("⚡正在解析市場動態...", expanded=True) as status:
         meta = get_stock_list()
         pre_df, mis_err = fast_mis_scan(meta, status, now_ts, is_test)
         final_res, stats = core_filter_engine(pre_df, meta, now_ts, status, mis_err, is_test)
-        status.update(label="✅ 計算完成！", state="complete")
+        status.update(label="✅ 分析完成", state="complete")
 
-    # 【防爆圖表區】
-    st.markdown("### 📊 掃描統計戰報")
-    col1, col2, col3 = st.columns(3)
-    # 使用 get 方法保底，絕對不噴 KeyError
-    col1.metric("初始候選", stats.get("Total", 0))
-    col2.metric("錄取檔數", len(final_res))
-    col3.metric("連線失敗", stats.get("YF連線失敗", 0) + stats.get("MIS_Err", 0))
-    
-    # 【戰損名單透明化】
-    with st.expander("🔍 淘汰名單點名：為什麼那兩檔股票沒出現？", expanded=True):
-        has_fail = False
+    # --- 頂部儀表板 ---
+    st.markdown("### 📊 市場實時統計")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("初始候選", stats.get("Total", 0))
+    m2.metric("錄取檔數", len(final_res))
+    m3.metric("鎖死率", f"{int(len(final_res[final_res['狀態']=='🔒 已鎖'])/len(final_res)*100)}%" if not final_res.empty else "0%")
+    m4.metric("MIS 狀態", "🟢 正常" if mis_err==0 else f"🔴 失敗 {mis_err}")
+
+    # --- 戰損名單 (透明化) ---
+    with st.expander("🔍 淘汰數據分析 (點擊查看被刷掉的標的)", expanded=False):
         for reason, stocks in stats.items():
             if isinstance(stocks, list) and stocks:
-                has_fail = True
-                st.markdown(f"**❌ {reason}**")
-                st.write(", ".join(stocks))
-        if not has_fail:
-            st.info("目前無淘汰數據。")
+                st.markdown(f"**{reason}**")
+                # 用標籤雲呈現淘汰名單
+                tags_html = "".join([f'<span class="fail-tag">{s}</span>' for s in stocks])
+                st.markdown(f'<div>{tags_html}</div>', unsafe_allow_html=True)
+                st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
 
+    # --- 最終名單渲染 ---
     if not final_res.empty:
-        st.success(f"🎯 發現 {len(final_res)} 檔具備連板潛力標的！")
+        st.markdown("---")
+        st.markdown("### 🎯 錄取名單")
         cols = st.columns(4)
         for i, r in final_res.iterrows():
             with cols[i % 4]:
-                st.markdown(f"""<div class="card"><div class="metric"><div><span class="tag-stage1">{r['階段']}</span><br><span class="code">{r['代號']}</span> {r['名稱']}</div><div class="price">{r['現價']}</div></div>
-                    <div style="font-size:13px; color:#9ca3af; margin-top:10px;">狀態: {r['狀態']} | 爆量: {r['爆量x']:.1f}x</div></div>""", unsafe_allow_html=True)
+                st.markdown(f"""
+                <div class="pro-card">
+                    <div class="tag-pro tag-rise">{r['階段']}</div>
+                    <div class="code-label">{r['代號']}</div>
+                    <div class="stock-name">{r['名稱']}</div>
+                    <div style="height:15px;"></div>
+                    <div class="price-large">{r['現價']:.2f}</div>
+                    <div style="font-size:13px; color:#86868b; margin-top:10px;">
+                        {r['狀態']} | 爆量 {r['爆量x']:.1f}x
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
     else:
-        st.warning("⚠️ 目前無標的通過嚴格濾網。請查看上方「淘汰名單」或開啟「測試模式」。")
+        st.warning("🌙 凌晨測試中，全市場未發現符合『特種部隊』濾網的標的。建議開啟測試模式。")
