@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神修正版 2.0｜1~N 根連板通吃｜精準漲停判斷
+# app.py — 起漲戰情室｜戰神修正版 3.0｜1~N 根連板通吃｜精準漲停判斷
 import io
 import math
 import time
@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="起漲戰情室｜戰神修正版 2.0", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室｜戰神修正版 3.0", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
@@ -44,9 +44,11 @@ CSS = """
 st.markdown(CSS, unsafe_allow_html=True)
 
 # =========================
-# MATH & TICK HELPERS
+# HELPERS
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
+
+# 【核心修正 3】: 安全時間比例，防止負值
 def get_vol_frac(ts):
     m = int((datetime.combine(ts.date(), ts.time()) - datetime.combine(ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
@@ -67,7 +69,6 @@ def calc_limit_up(prev_close, limit_pct=0.10):
     tick = tw_tick(raw)
     return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
-# 【核心修正 2】: 安全數字切割
 def split_nums(s):
     out = []
     for x in str(s or "").split("_"):
@@ -194,7 +195,9 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                     cp, pp, hp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1]), float(past_10["High"].iloc[i])
                     l10, l20 = calc_limit_up(pp, 0.10), calc_limit_up(pp, 0.20)
                     # 判斷制度：哪個漲停價更接近當天收盤或最高價，且必須在 2 Tick 內
-                    use20 = (abs(cp - l20) < abs(cp - l10) or abs(hp - l20) < abs(hp - l10)) and (min(abs(cp - l20), abs(hp - l20)) <= 2 * tw_tick(l20))
+                    d10 = min(abs(cp - l10), abs(hp - l10))
+                    d20 = min(abs(cp - l20), abs(hp - l20))
+                    use20 = (d20 < d10) and (d20 <= 2 * tw_tick(l20))
                     daily_lim = l20 if use20 else l10
                     if cp >= (daily_lim - tw_tick(daily_lim)): past_boards += 1
                     else: break
