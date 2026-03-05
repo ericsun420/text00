@@ -1,7 +1,8 @@
-# app.py — 起漲戰情室｜戰神 7.3 終極破壁版｜陣列完美對齊｜細胞分裂無漏版｜Ultra Pro
+# app.py — 起漲戰情室｜戰神 7.4 隱形迷彩版｜動態偽裝防封鎖｜Ultra Pro 旗艦
 import io
 import math
 import time
+import random
 from datetime import datetime, timedelta, time as dtime
 from collections import deque
 
@@ -35,11 +36,29 @@ def diag_err(diag, e, tag="ERR"):
 
 def make_retry_session():
     s = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.4, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",), respect_retry_after_header=True)
+    # 增加 backoff_factor 讓重試的間隔稍微拉長，避免被視為 DDoS
+    retry = Retry(total=3, backoff_factor=0.5, status_forcelist=(403, 429, 500, 502, 503, 504), allowed_methods=("GET",), respect_retry_after_header=True)
     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     return s
+
+# ✅ 新增：隱形迷彩 (隨機生成瀏覽器標頭，假裝是真人在看網頁)
+def get_stealth_headers():
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    ]
+    return {
+        "User-Agent": random.choice(user_agents),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "X-Requested-With": "XMLHttpRequest",
+        "Connection": "keep-alive",
+        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"
+    }
 
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def yf_download_daily(syms):
@@ -59,7 +78,6 @@ def yf_download_daily(syms):
 st.set_page_config(page_title="起漲戰情室 Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
-    /* 深邃宇宙黑背景 */
     [data-testid="stAppViewContainer"], .main { 
         background: #050505 !important; 
         background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important;
@@ -67,12 +85,8 @@ st.markdown("""
     }
     .block-container { padding-top: 2rem; max-width: 1280px; }
     [data-testid="stSidebar"] { display: none !important; }
-    
-    /* 頂部標題 */
     .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
     .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px;}
-    
-    /* 奢華流光卡片 */
     .pro-card { 
         background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); 
         backdrop-filter: blur(24px); 
@@ -84,40 +98,16 @@ st.markdown("""
         transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
         box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
     }
-    .pro-card:hover { 
-        border-color: rgba(56, 189, 248, 0.4); 
-        transform: translateY(-5px) scale(1.01); 
-        box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15);
-    }
-    
-    /* 卡片內文字 */
+    .pro-card:hover { border-color: rgba(56, 189, 248, 0.4); transform: translateY(-5px) scale(1.01); box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15); }
     .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
     .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
     .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px;}
     .fail-tag { display: inline-block; padding: 6px 12px; background: rgba(244, 63, 94, 0.05); color: #f43f5e; border-radius: 8px; margin: 4px; font-size: 12px; border: 1px solid rgba(244, 63, 94, 0.15); font-weight: 600;}
-    
-    /* 頂級按鈕 */
-    .stButton>button { 
-        border-radius: 16px !important; 
-        background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%) !important; 
-        color: #0f172a !important; 
-        font-weight: 900 !important; 
-        padding: 20px !important; 
-        width: 100% !important; 
-        border: none !important;
-        font-size: 18px !important;
-        letter-spacing: 2px !important;
-        box-shadow: 0 4px 15px rgba(255,255,255,0.1) !important;
-        transition: all 0.3s ease !important;
-    }
+    .stButton>button { border-radius: 16px !important; background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%) !important; color: #0f172a !important; font-weight: 900 !important; padding: 20px !important; width: 100% !important; border: none !important; font-size: 18px !important; letter-spacing: 2px !important; box-shadow: 0 4px 15px rgba(255,255,255,0.1) !important; transition: all 0.3s ease !important; }
     .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.2) !important; }
-    
-    /* 美化 Streamlit 預設 Metric */
     [data-testid="stMetric"] { background: rgba(20,20,20,0.6); padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.03); }
     [data-testid="stMetricValue"] { font-size: 32px !important; font-weight: 900 !important; color: #f1f5f9 !important; }
     [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; letter-spacing: 1px; }
-    
-    /* Expander 美化 */
     [data-testid="stExpander"] { background: transparent !important; border: 1px solid rgba(255,255,255,0.05) !important; border-radius: 16px !important; }
     [data-testid="stExpander"] summary { background: rgba(20,20,20,0.4) !important; border-radius: 16px !important; }
 </style>
@@ -170,7 +160,7 @@ def get_stock_list():
             ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
         try:
-            r = session.get(url, timeout=15, verify=False); r.raise_for_status()
+            r = session.get(url, timeout=15, verify=False, headers=get_stealth_headers()); r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
             c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
@@ -183,11 +173,10 @@ def get_stock_list():
     return meta
 
 def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"}
     session, rows, err_mis = make_retry_session(), [], 0
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=headers, timeout=10, verify=False)
+    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=get_stealth_headers(), timeout=10, verify=False)
     except Exception as e: diag_err(diag, e, "MIS_WARMUP")
 
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
@@ -202,10 +191,11 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
         status_placeholder.update(label=f"📡 穿透雷達掃描中... ({i}/{len(codes)})", state="running")
         try:
-            r = session.get(url, headers=headers, timeout=12, verify=False)
+            # 套用動態偽裝 Header
+            r = session.get(url, headers=get_stealth_headers(), timeout=12, verify=False)
             data = r.json().get("msgArray", [])
         except:
-            err_mis += 1; mis_diag["mis_req_err"] += 1; time.sleep(0.1); continue
+            err_mis += 1; mis_diag["mis_req_err"] += 1; time.sleep(0.2); continue
 
         for q in data:
             mis_diag["mis_seen"] += 1
@@ -228,7 +218,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                         "best_bid": bp[0] if bp else 0.0, "bid_sh1": bv[0] if bv else 0.0
                     })
             except: mis_diag["mis_parse_fail"] += 1
-        time.sleep(0.12 if not is_test else 0.01)
+        time.sleep(0.15 if not is_test else 0.02) # 稍微加長一點休息時間，避免觸發防護
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -249,7 +239,6 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     t_yf_start = time.perf_counter()
     raw_daily = None
     
-    # ✅ 修正 1：陣列完美對齊，空塊也要佔位，維持 index 閉環
     def try_yf_parts(parts):
         res_frames = []
         for part in parts:
@@ -265,8 +254,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 
     try:
         raw_daily = yf_download_daily(syms)
-        if raw_daily is None or getattr(raw_daily, "empty", False):
-            raise Exception("YF_BULK_EMPTY")
+        if raw_daily is None or getattr(raw_daily, "empty", False): raise Exception("YF_BULK_EMPTY")
         diag["yf_rescue_used"] = 0 
     except Exception as e:
         tag = "YF_BULK_EMPTY" if str(e) == "YF_BULK_EMPTY" else "YF_BULK_FAIL"
@@ -287,7 +275,6 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             for i, f in enumerate(frames1):
                 if f is None or getattr(f, "empty", False):
                     p = parts1[i]
-                    # ✅ 修正 2：如果本身就是空陣列，就不要再無意義切分
                     if not p: continue 
                     if len(p) > 1:
                         m2 = len(p)//2
@@ -383,7 +370,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # MAIN
 # =========================
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v7.3 完美版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v7.4 隱形迷彩版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
@@ -454,6 +441,6 @@ if scan:
                 </div>""", unsafe_allow_html=True)
     else: 
         if d.get("mis_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)，請確認執行環境。")
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)。如果您部署在雲端平台 (如 Streamlit Cloud)，請嘗試在本地端 (Local) 電腦執行。")
         else:
             st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
