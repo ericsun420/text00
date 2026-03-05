@@ -1,7 +1,8 @@
-# app.py  —  起漲戰情室（冷酷黑灰｜懶人版｜卡片+美化表格｜不顯示 Running...）
+# app.py  —  起漲戰情室（第一根漲停｜連板潛力｜冷酷黑灰｜卡片+美化表格｜不顯示 Running...）
 # 直接整份複製貼上覆蓋 app.py 即可
 # 需要套件：streamlit pandas yfinance requests lxml urllib3
 
+import math
 import time
 import re
 from datetime import datetime, timedelta, time as dtime
@@ -17,7 +18,7 @@ import streamlit.components.v1 as components
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
-# Page & Cold black/grey theme
+# Page & Theme
 # =========================
 st.set_page_config(page_title="起漲戰情室", page_icon="🧊", layout="wide")
 
@@ -181,6 +182,28 @@ def minutes_elapsed_in_session(ts: datetime) -> int:
         return 270
     return int((ts - start).total_seconds() // 60)
 
+def is_market_time(ts: datetime) -> bool:
+    t = ts.time()
+    return dtime(9, 0) <= t <= dtime(13, 30)
+
+# --- Taiwan tick size (approx, good enough with 1-tick tolerance) ---
+def tw_tick(price: float) -> float:
+    if price < 10:
+        return 0.01
+    if price < 50:
+        return 0.05
+    if price < 100:
+        return 0.1
+    if price < 500:
+        return 0.5
+    if price < 1000:
+        return 1.0
+    return 5.0
+
+def round_to_tick(x: float, tick: float) -> float:
+    # round to nearest tick
+    return round(round(x / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
+
 # =========================
 # MOPS list (robust decode)
 # =========================
@@ -233,7 +256,18 @@ def fetch_all_twse_listed_stocks() -> pd.DataFrame:
 # =========================
 # Daily baseline (always return expected columns)
 # =========================
-EXPECTED_BASE_COLS = ["code", "vol_ma20_shares", "high20", "ma60", "yday_vol_shares", "yday_close", "change_5d"]
+EXPECTED_BASE_COLS = [
+    "code",
+    "vol_ma20_shares",
+    "high20",
+    "high60",
+    "ma60",
+    "yday_close",
+    "prev2_close",
+    "yday_ret",
+    "ret_5d",
+    "atr20_pct",
+]
 
 def _drop_today_bar_if_exists(df: pd.DataFrame, today_date) -> pd.DataFrame:
     if df.empty:
@@ -246,7 +280,8 @@ def _drop_today_bar_if_exists(df: pd.DataFrame, today_date) -> pd.DataFrame:
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def build_daily_baselines(codes: list[str]) -> pd.DataFrame:
     end_date = now_taipei().date()
-    start = (now_taipei() - timedelta(days=200)).date().isoformat()
+    start = (now_taipei() - timedelta(days=260)).date().isoformat()
+
     batch = 60
     records = []
 
@@ -278,17 +313,42 @@ def build_daily_baselines(codes: list[str]) -> pd.DataFrame:
                     df = raw.dropna().copy()
 
                 df = _drop_today_bar_if_exists(df, end_date)
-                if df.empty or len(df) < 80:
+                if df.empty or len(df) < 90:
                     continue
+
+                yday_close = float(df["Close"].iloc[-1])
+                prev2_close = float(df["Close"].iloc[-2])
+
+                # rolling highs (exclude yesterday to represent "breakout from base")
+                high20 = df["High"].rolling(20).max().shift(1).iloc[-1]
+                high60 = df["High"].rolling(60).max().shift(1).iloc[-1]
+
+                ma60 = df["Close"].rolling(60).mean().iloc[-1]
+                vol_ma20 = df["Volume"].rolling(20).mean().iloc[-1]
+
+                yday_ret = (yday_close / prev2_close - 1.0) if prev2_close else None
+                ret_5d = (yday_close / float(df["Close"].iloc[-6]) - 1.0) if len(df) >= 6 else None
+
+                # ATR20%
+                prev_close = df["Close"].shift(1)
+                tr1 = (df["High"] - df["Low"]).abs()
+                tr2 = (df["High"] - prev_close).abs()
+                tr3 = (df["Low"] - prev_close).abs()
+                tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+                atr20 = tr.rolling(20).mean().iloc[-1]
+                atr20_pct = (float(atr20) / yday_close * 100.0) if yday_close else None
 
                 records.append({
                     "code": c,
-                    "vol_ma20_shares": float(df["Volume"].rolling(20).mean().iloc[-1]),
-                    "high20": float(df["High"].rolling(20).max().shift(1).iloc[-1]),
-                    "ma60": float(df["Close"].rolling(60).mean().iloc[-1]),
-                    "yday_vol_shares": float(df["Volume"].iloc[-1]),
-                    "yday_close": float(df["Close"].iloc[-1]),
-                    "change_5d": float((df["Close"].iloc[-1] / df["Close"].iloc[-6] - 1.0)) if len(df) >= 6 else None,
+                    "vol_ma20_shares": float(vol_ma20),
+                    "high20": float(high20) if pd.notna(high20) else None,
+                    "high60": float(high60) if pd.notna(high60) else None,
+                    "ma60": float(ma60) if pd.notna(ma60) else None,
+                    "yday_close": yday_close,
+                    "prev2_close": prev2_close,
+                    "yday_ret": float(yday_ret) if yday_ret is not None else None,
+                    "ret_5d": float(ret_5d) if ret_5d is not None else None,
+                    "atr20_pct": float(atr20_pct) if atr20_pct is not None else None,
                 })
             except Exception:
                 continue
@@ -313,6 +373,7 @@ def fetch_intraday_snapshot_yf(codes: list[str], interval: str = "5m", batch_siz
     for i in range(0, len(codes), batch_size):
         chunk = codes[i:i + batch_size]
         tickers = " ".join([f"{c}.TW" for c in chunk])
+
         try:
             raw = yf.download(
                 tickers=tickers,
@@ -343,8 +404,8 @@ def fetch_intraday_snapshot_yf(codes: list[str], interval: str = "5m", batch_siz
                     "code": c,
                     "last": float(df["Close"].iloc[-1]),
                     "open": float(df["Open"].iloc[0]),
-                    "high": float(df["High"].max()),
-                    "low": float(df["Low"].min()),
+                    "day_high": float(df["High"].max()),
+                    "day_low": float(df["Low"].min()),
                     "vol_lots": int(float(df["Volume"].sum()) / 1000),
                 })
             except Exception:
@@ -358,118 +419,172 @@ def fetch_intraday_snapshot_yf(codes: list[str], interval: str = "5m", batch_siz
     return df.drop_duplicates("code")
 
 # =========================
-# Lazy presets
+# Presets (for FIRST LIMIT-UP + continuation potential)
 # =========================
 PRESETS = {
-    "保守（少訊號、盡量避雷）": dict(
-        breakout_buffer_pct=1.2, vol_mult=3.0, close_pos_min=0.75, upper_shadow_max=0.25,
-        min_cum_lots=2500, require_above_ma60=True,
-        avoid_yday_spike=True, yday_spike_mult=1.6,
-        avoid_overheat_5d=True, overheat_5d_max=15,
-        require_green_body=True, body_min_pct=3.0,
+    "保守（只抓幾乎鎖死、連板體質強）": dict(
+        min_vol_ratio=2.8,
+        min_cum_lots=1500,
+        min_close_pos=0.92,
+        max_pullback=0.0025,     # 0.25%
+        max_ret_5d=0.08,         # 8%
+        max_atr20_pct=4.5,       # 4.5% ATR
+        require_break_high60=True,
     ),
-    "標準（大多數人用）": dict(
-        breakout_buffer_pct=1.0, vol_mult=2.5, close_pos_min=0.70, upper_shadow_max=0.30,
-        min_cum_lots=2000, require_above_ma60=True,
-        avoid_yday_spike=True, yday_spike_mult=1.8,
-        avoid_overheat_5d=True, overheat_5d_max=18,
-        require_green_body=True, body_min_pct=2.5,
+    "標準（平衡：第一根漲停 + 連板機率）": dict(
+        min_vol_ratio=2.2,
+        min_cum_lots=1200,
+        min_close_pos=0.90,
+        max_pullback=0.0035,     # 0.35%
+        max_ret_5d=0.12,         # 12%
+        max_atr20_pct=6.0,
+        require_break_high60=False,
     ),
-    "積極（多訊號、容忍波動）": dict(
-        breakout_buffer_pct=0.6, vol_mult=2.0, close_pos_min=0.62, upper_shadow_max=0.38,
-        min_cum_lots=1200, require_above_ma60=False,
-        avoid_yday_spike=False, yday_spike_mult=2.2,
-        avoid_overheat_5d=False, overheat_5d_max=25,
-        require_green_body=False, body_min_pct=2.0,
+    "積極（多抓：允許盤中較不穩）": dict(
+        min_vol_ratio=1.6,
+        min_cum_lots=800,
+        min_close_pos=0.86,
+        max_pullback=0.0060,     # 0.6%
+        max_ret_5d=0.18,
+        max_atr20_pct=8.0,
+        require_break_high60=False,
     ),
 }
 
-def scan_intraday_breakouts(quotes: pd.DataFrame, base: pd.DataFrame, now_ts: datetime, p: dict) -> pd.DataFrame:
-    if base is None or base.empty:
+def scan_first_limitup_with_continuation(
+    quotes: pd.DataFrame,
+    base: pd.DataFrame,
+    now_ts: datetime,
+    preset: dict,
+) -> pd.DataFrame:
+    if base is None or base.empty or quotes is None or quotes.empty:
         return pd.DataFrame()
 
     df = quotes.merge(base, on="code", how="inner").copy()
     if df.empty:
         return pd.DataFrame()
 
-    need = ["last","open","high","low","high20","vol_ma20_shares","yday_close","vol_lots"]
-    df = df.dropna(subset=[c for c in need if c in df.columns])
-    if df.empty:
-        return pd.DataFrame()
-
-    df["cum_vol_shares"] = df["vol_lots"].astype(float) * 1000.0
-    df["breakout_level"] = df["high20"] * (1.0 + p["breakout_buffer_pct"] / 100.0)
-    df["cond_breakout"] = df["last"] > df["breakout_level"]
-
-    rng = (df["high"] - df["low"]).replace(0, 1e-9)
-    df["close_pos"] = (df["last"] - df["low"]) / rng
-    df["cond_close_pos"] = df["close_pos"] >= p["close_pos_min"]
-
-    df["real_body_top"] = df[["open","last"]].max(axis=1)
-    df["upper_shadow_ratio"] = (df["high"] - df["real_body_top"]) / rng
-    df["cond_shadow"] = df["upper_shadow_ratio"] <= p["upper_shadow_max"]
-
-    df["body_return"] = (df["last"] - df["open"]) / df["open"]
-    if p["require_green_body"]:
-        df["cond_green_body"] = (df["last"] > df["open"]) & (df["body_return"] >= p["body_min_pct"] / 100.0)
-    else:
-        df["cond_green_body"] = True
-
+    # expected volume ratio (still linear, but good enough; can be improved to intraday profile later)
     elapsed = minutes_elapsed_in_session(now_ts)
     frac = max(0.2, max(1, min(270, elapsed)) / 270.0)
-    df["expected_vol_shares_now"] = df["vol_ma20_shares"] * frac
+    df["expected_vol_shares_now"] = df["vol_ma20_shares"].astype(float) * frac
+    df["cum_vol_shares"] = df["vol_lots"].astype(float) * 1000.0
     df["vol_ratio_now"] = df["cum_vol_shares"] / (df["expected_vol_shares_now"] + 1e-9)
-    df["cond_vol_burst"] = df["vol_ratio_now"] >= p["vol_mult"]
 
-    df["cond_min_cum"] = df["vol_lots"].astype(int) >= int(p["min_cum_lots"])
+    # limit-up percent: default 10%; if already >11.5% assume 20% rule
+    df["ret_now"] = (df["last"] / df["yday_close"] - 1.0)
+    df["limit_pct"] = df["ret_now"].apply(lambda x: 0.20 if pd.notna(x) and x > 0.115 else 0.10)
 
-    if p["require_above_ma60"]:
-        df = df.dropna(subset=["ma60"])
-        if df.empty:
-            return pd.DataFrame()
-        df["cond_above_ma60"] = df["last"] > df["ma60"]
-    else:
-        df["cond_above_ma60"] = True
+    # limit-up price with tick rounding (1-tick tolerance later)
+    def _limit_up(row):
+        prev = float(row["yday_close"])
+        pct = float(row["limit_pct"])
+        raw = prev * (1.0 + pct)
+        tick = tw_tick(raw)
+        return round_to_tick(raw, tick)
 
-    if p["avoid_yday_spike"]:
-        df["cond_yday_ok"] = df["yday_vol_shares"] <= (df["vol_ma20_shares"] * p["yday_spike_mult"])
-    else:
-        df["cond_yday_ok"] = True
+    df["limit_up"] = df.apply(_limit_up, axis=1)
+    df["tick"] = df["limit_up"].apply(tw_tick)
 
-    if p["avoid_overheat_5d"]:
-        df["cond_overheat_ok"] = df["change_5d"].fillna(0) <= p["overheat_5d_max"] / 100.0
-    else:
-        df["cond_overheat_ok"] = True
+    # near-limit / lock quality proxies
+    rng = (df["day_high"] - df["day_low"]).replace(0, 1e-9)
+    df["close_pos"] = (df["last"] - df["day_low"]) / rng
+    df["pullback_from_high"] = (df["day_high"] - df["last"]) / (df["day_high"] + 1e-9)
 
+    df["dist_to_limit_pct"] = (df["limit_up"] - df["last"]) / (df["limit_up"] + 1e-9) * 100.0
+    df["near_limit"] = df["last"] >= (df["limit_up"] - df["tick"] * 1.0)  # within 1 tick
+
+    # "first board" exclusions: yesterday not limit-up
+    # use 10% as baseline for yesterday check; 1% tolerance
+    df["yday_was_limit"] = df["yday_ret"].apply(lambda x: True if pd.notna(x) and x >= 0.095 else False)
+
+    # base/tightness / overheat filters
+    df["ret_5d"] = df["ret_5d"].fillna(0.0)
+    df["atr20_pct"] = df["atr20_pct"].fillna(999.0)
+
+    # breakout to reduce overhead supply (optional)
+    df["break_high60"] = True
+    if "high60" in df.columns:
+        df["break_high60"] = df["limit_up"] >= (df["high60"].fillna(0) * 0.995)
+
+    # MAIN FILTER: FIRST LIMIT-UP candidate (price-based)
     cond = (
-        df["cond_breakout"] & df["cond_vol_burst"] & df["cond_close_pos"] &
-        df["cond_shadow"] & df["cond_min_cum"] & df["cond_above_ma60"] &
-        df["cond_yday_ok"] & df["cond_overheat_ok"] & df["cond_green_body"]
+        df["near_limit"]
+        & (df["vol_ratio_now"] >= float(preset["min_vol_ratio"]))
+        & (df["vol_lots"] >= int(preset["min_cum_lots"]))
+        & (df["close_pos"] >= float(preset["min_close_pos"]))
+        & (df["pullback_from_high"] <= float(preset["max_pullback"]))
+        & (~df["yday_was_limit"])  # ✅ first board
+        & (df["ret_5d"] <= float(preset["max_ret_5d"]))
+        & (df["atr20_pct"] <= float(preset["max_atr20_pct"]))
     )
+    if preset.get("require_break_high60", False):
+        cond = cond & (df["break_high60"])
+
     out = df[cond].copy()
     if out.empty:
         return pd.DataFrame()
 
-    out["較昨收(%)"] = (out["last"] / out["yday_close"] - 1.0) * 100.0
-    out["綜合分數"] = (
-        2.0 * out["vol_ratio_now"].clip(0, 10) +
-        1.5 * out["close_pos"].clip(0, 1) -
-        1.0 * out["upper_shadow_ratio"].clip(0, 1) +
-        0.3 * out["body_return"].clip(-1, 1)
-    )
+    # Continuation score (0-100): lock quality + volume quality + base quality + breakout
+    # (all internal; user still only selects preset)
+    def _score(r):
+        s = 0.0
 
-    out = out.sort_values(["綜合分數", "vol_ratio_now"], ascending=False)
+        # lock/ # lock/near limit
+        s += 35.0 * min(1.0, max(0.0, (float(r["close_pos"]) - 0.85) / 0.15))
+        s += 25.0 * min(1.0, max(0.0, (0.006 - float(r["pullback_from_high"])) / 0.006))
 
-    out = out.rename(columns={
-        "code":"代號", "last":"現價", "vol_lots":"累積量(張)", "vol_ratio_now":"盤中爆量倍數",
-        "high20":"前20日高", "breakout_level":"突破門檻"
-    })
+        # volume quality
+        vr = float(r["vol_ratio_now"])
+        s += 25.0 * min(1.0, max(0.0, (vr - 1.5) / 3.0))
 
-    keep = ["代號","現價","較昨收(%)","累積量(張)","盤中爆量倍數","前20日高","突破門檻","綜合分數"]
-    return out[keep].copy()
+        # base tightness / not overextended
+        atr = float(r["atr20_pct"])
+        s += 10.0 * min(1.0, max(0.0, (8.0 - atr) / 6.0))
+
+        r5 = float(r["ret_5d"])
+        s += 10.0 * min(1.0, max(0.0, (0.18 - r5) / 0.18))
+
+        # breakout bonus
+        if bool(r.get("break_high60", True)):
+            s += 5.0
+
+        return max(0.0, min(100.0, s))
+
+    out["連板潛力分"] = out.apply(_score, axis=1)
+    out = out.sort_values(["連板潛力分", "dist_to_limit_pct", "vol_ratio_now"], ascending=[False, True, False])
+
+    show = out[[
+        "code",
+        "last",
+        "limit_up",
+        "dist_to_limit_pct",
+        "vol_lots",
+        "vol_ratio_now",
+        "ret_now",
+        "ret_5d",
+        "atr20_pct",
+        "連板潛力分",
+    ]].copy()
+
+    show.rename(columns={
+        "code": "代號",
+        "last": "現價",
+        "limit_up": "漲停價",
+        "dist_to_limit_pct": "距離漲停(%)",
+        "vol_lots": "累積量(張)",
+        "vol_ratio_now": "盤中爆量倍數",
+        "ret_now": "較昨收(%)",
+        "ret_5d": "近5日漲幅(%)",
+        "atr20_pct": "ATR20(%)",
+    }, inplace=True)
+
+    show["較昨收(%)"] = show["較昨收(%)"] * 100.0
+    show["近5日漲幅(%)"] = show["近5日漲幅(%)"] * 100.0
+    return show.reset_index(drop=True)
 
 # =========================
-# Beautiful table via components.html (won't show <tr> as text)
+# Beautiful table via components.html
 # =========================
 def render_pretty_table(df: pd.DataFrame) -> None:
     if df.empty:
@@ -496,12 +611,14 @@ def render_pretty_table(df: pd.DataFrame) -> None:
           <td>{r.get('代號','')}</td>
           <td>{r.get('名稱','')}</td>
           <td class="num">{f2(r.get('現價',''))}</td>
+          <td class="num">{f2(r.get('漲停價',''))}</td>
+          <td class="num">{f2(r.get('距離漲停(%)',''))}</td>
           <td class="num">{f2(r.get('較昨收(%)',''))}</td>
           <td class="num">{f0(r.get('累積量(張)',''))}</td>
           <td class="num">{f2(r.get('盤中爆量倍數',''))}</td>
-          <td class="num">{f2(r.get('前20日高',''))}</td>
-          <td class="num">{f2(r.get('突破門檻',''))}</td>
-          <td class="num">{f2(r.get('綜合分數',''))}</td>
+          <td class="num">{f2(r.get('近5日漲幅(%)',''))}</td>
+          <td class="num">{f2(r.get('ATR20(%)',''))}</td>
+          <td class="num">{f2(r.get('連板潛力分',''))}</td>
         </tr>
         """)
 
@@ -546,6 +663,7 @@ def render_pretty_table(df: pd.DataFrame) -> None:
           color: var(--text);
           border-bottom: 1px solid var(--line);
           font-weight: 900;
+          white-space: nowrap;
         }}
         tbody td {{
           padding: 11px 12px;
@@ -568,12 +686,14 @@ def render_pretty_table(df: pd.DataFrame) -> None:
               <th>代號</th>
               <th>名稱</th>
               <th class="num">現價</th>
+              <th class="num">漲停價</th>
+              <th class="num">距離漲停(%)</th>
               <th class="num">較昨收(%)</th>
               <th class="num">累積量(張)</th>
               <th class="num">盤中爆量倍數</th>
-              <th class="num">前20日高</th>
-              <th class="num">突破門檻</th>
-              <th class="num">綜合分數</th>
+              <th class="num">近5日漲幅(%)</th>
+              <th class="num">ATR20(%)</th>
+              <th class="num">連板潛力分</th>
             </tr>
           </thead>
           <tbody>
@@ -587,11 +707,11 @@ def render_pretty_table(df: pd.DataFrame) -> None:
     components.html(html, height=610, scrolling=False)
 
 # =========================
-# Sidebar
+# Sidebar (still lazy)
 # =========================
 st.sidebar.markdown("### 🧠 懶人設定")
-preset_name = st.sidebar.selectbox("風險等級", list(PRESETS.keys()), index=1)
-pool_mode = st.sidebar.selectbox("掃描模式", ["流動性預篩（推薦）", "全上市（很慢）"], index=0)
+preset_name = st.sidebar.selectbox("模式", list(PRESETS.keys()), index=1)
+pool_mode = st.sidebar.selectbox("股票池", ["流動性預篩（推薦）", "全上市（很慢）"], index=0)
 st.sidebar.markdown("---")
 run_scan = st.sidebar.button("🧊 立即掃描", use_container_width=True)
 refresh_cache = st.sidebar.button("🔄 清快取", use_container_width=True)
@@ -606,11 +726,14 @@ st.markdown(f"""
 <div class="header-wrap">
   <div>
     <h1 class="title">起漲戰情室</h1>
-    <div class="subtitle">新手懶人版：只選「風險等級」→按「立即掃描」</div>
+    <div class="subtitle">主軸：抓「第一根漲停」並提高 2～7 根連板機率（瑞軒型）</div>
   </div>
   <div class="pill"><span class="dot"></span> 台北時間 <b>{now_ts.strftime('%H:%M:%S')}</b>　盤中進度 <b>{elapsed}/270</b></div>
 </div>
 """, unsafe_allow_html=True)
+
+if not is_market_time(now_ts):
+    st.info("目前非盤中：掃描會使用『最後可取得的盤中資料快照』，準確度會比 09:00～13:30 低。")
 
 # =========================
 # Load stock list
@@ -631,7 +754,7 @@ if refresh_cache:
     st.success("已清除快取。")
 
 # =========================
-# Universe (safe fallback)
+# Universe (safe)
 # =========================
 base_df = None
 codes_to_scan = all_codes
@@ -647,7 +770,8 @@ if pool_mode.startswith("流動性預篩"):
         codes_to_scan = all_codes
         universe_label = "全上市（預篩失敗→自動降級）"
     else:
-        liq_threshold_shares = 500_000  # 500 張/日
+        # 20日均量>=500張/日
+        liq_threshold_shares = 500_000
         kept = base_df[base_df["vol_ma20_shares"].astype(float) >= liq_threshold_shares]["code"].tolist()
         if len(kept) < 50:
             st.warning("預篩資料太少（可能不完整），已自動改用『全上市』模式。")
@@ -658,21 +782,22 @@ if pool_mode.startswith("流動性預篩"):
             codes_to_scan = kept
             universe_label = f"流動性預篩（{len(codes_to_scan)} 檔）"
 
-p = PRESETS[preset_name]
+preset = PRESETS[preset_name]
 
-# Pre-scan cards
+# Pre cards
 st.markdown(f"""
 <div class="grid">
   <div class="card"><div class="k">股票池</div><div class="v">{universe_label}</div></div>
-  <div class="card"><div class="k">風險等級</div><div class="v">{preset_name.split('（')[0]}<small>（已內建參數）</small></div></div>
-  <div class="card"><div class="k">判斷邏輯</div><div class="v">突破 + 爆量 + 收高</div></div>
-  <div class="card"><div class="k">建議掃描時間</div><div class="v">13:15 – 13:25</div></div>
+  <div class="card"><div class="k">掃描目標</div><div class="v">第一根漲停</div></div>
+  <div class="card"><div class="k">策略重點</div><div class="v">幾乎鎖死 + 體質濾網</div></div>
+  <div class="card"><div class="k">模式</div><div class="v">{preset_name.split('（')[0]}<small>（內建參數）</small></div></div>
 </div>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="banner">
-<b>一句話：</b>「突破 20 日高 + 盤中爆量 + 站得住（收在高檔、上影線短）」才算真正的第一根。
+<b>判斷方式（你不用調參數）：</b>
+接近漲停（1 tick 內）＋回落很小＋收在高檔＋盤中爆量品質＋排除昨日已漲停 → 再用「連板潛力分」排序。
 </div>
 """, unsafe_allow_html=True)
 
@@ -680,12 +805,12 @@ st.markdown("""
 # Scan
 # =========================
 if run_scan:
-    with st.spinner("取得日線基準（MA / 20日高 / 均量 / 過熱 / 昨日爆量）..."):
+    with st.spinner("取得日線基準（高點/均量/ATR/昨日漲幅/近5日）..."):
         if base_df is None:
             base_df = build_daily_baselines(codes_to_scan)
 
     if base_df is None or base_df.empty:
-        st.error("日線基準仍抓不到（yfinance 可能被限流）。請稍後再試，或先用更小股票池。")
+        st.error("日線基準抓不到（yfinance 可能被限流）。請稍後再試或換網路。")
         st.stop()
 
     with st.spinner("抓取盤中快照（yfinance intraday 5m）..."):
@@ -695,8 +820,8 @@ if run_scan:
         st.error("盤中快照抓不到（yfinance intraday 可能被限制）。")
         st.stop()
 
-    with st.spinner("計算訊號..."):
-        result = scan_intraday_breakouts(quotes_df, base_df, now_ts, p)
+    with st.spinner("鎖定第一根漲停 + 計算連板潛力分..."):
+        result = scan_first_limitup_with_continuation(quotes_df, base_df, now_ts, preset)
 
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
 
@@ -704,38 +829,39 @@ if run_scan:
 
     st.markdown(f"""
 <div class="grid">
-  <div class="card"><div class="k">即時資料來源</div><div class="v">yfinance intraday (5m)</div></div>
+  <div class="card"><div class="k">資料來源</div><div class="v">yfinance (5m)</div></div>
   <div class="card"><div class="k">掃描檔數</div><div class="v">{len(quotes_df):,}</div></div>
-  <div class="card"><div class="k">符合條件</div><div class="v">{found:,}</div></div>
-  <div class="card"><div class="k">策略模式</div><div class="v">{preset_name.split('（')[0]}</div></div>
+  <div class="card"><div class="k">第一根漲停候選</div><div class="v">{found:,}</div></div>
+  <div class="card"><div class="k">模式</div><div class="v">{preset_name.split('（')[0]}</div></div>
 </div>
 """, unsafe_allow_html=True)
 
     if found == 0:
-        st.warning("目前沒有符合條件的第一根。你可以改成「積極」再掃一次（會更容易出訊號）。")
+        st.warning("目前沒掃到符合『第一根漲停』且體質過濾通過的標的。你可以切到「積極」放寬條件再掃一次。")
     else:
         result = result.copy()
         result["名稱"] = result["代號"].map(name_map).fillna("")
         result.insert(0, "排名", range(1, len(result) + 1))
 
-        st.success(f"🧊 今日此刻掃到 {found} 檔符合『第一根』的候選標的")
+        st.success(f"🧊 掃到 {found} 檔「第一根漲停」候選（已按連板潛力分排序）")
 
         topn = result.head(12).copy()
-        q75 = float(topn["綜合分數"].quantile(0.75))
+        q75 = float(topn["連板潛力分"].quantile(0.75))
         cols = st.columns(4)
 
         for i, (_, r) in enumerate(topn.iterrows(), start=1):
             with cols[(i - 1) % 4]:
-                score = float(r["綜合分數"])
-                tag = "🔥 強" if score >= q75 else "✅ 可看"
+                score = float(r["連板潛力分"])
+                tag = "🔒 幾乎鎖死" if score >= q75 else "👀 候選"
 
                 code = str(r["代號"])
                 name = str(r["名稱"]) if pd.notna(r["名稱"]) else ""
                 price = float(r["現價"])
+                lim = float(r["漲停價"])
+                dist = float(r["距離漲停(%)"])
                 chg = float(r["較昨收(%)"])
                 lots = int(float(r["累積量(張)"]))
                 volx = float(r["盤中爆量倍數"])
-                brk = float(r["突破門檻"])
 
                 st.markdown(f"""
 <div class="card">
@@ -747,12 +873,12 @@ if run_scan:
     </div>
     <div style="text-align:right">
       <div class="price">{price:.2f}</div>
-      <div class="chg">較昨收 {chg:.2f}%</div>
+      <div class="chg">漲停 {lim:.2f}｜距離 {dist:.2f}%</div>
     </div>
   </div>
   <div class="hr"></div>
-  <div class="small-note">累積量：{lots:,} 張 ｜ 爆量：{volx:.2f}x</div>
-  <div class="small-note">突破門檻：{brk:.2f} ｜ 分數：{score:.2f}</div>
+  <div class="small-note">較昨收：{chg:.2f}% ｜ 累積量：{lots:,} 張 ｜ 爆量：{volx:.2f}x</div>
+  <div class="small-note">連板潛力分：{score:.1f}</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -761,4 +887,4 @@ if run_scan:
         with st.expander("📋 看完整榜單（美化表格）", expanded=True):
             render_pretty_table(result)
 
-st.caption("懶人版：只留『風險等級』與『股票池』；其餘條件內建。")
+st.caption("提醒：此工具用「價格型態」近似鎖死，沒有封單資料；連板只是機率提升，不是保證。")
