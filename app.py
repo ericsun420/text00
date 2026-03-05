@@ -1,4 +1,4 @@
-# app.py — 終極極簡暴力版｜1~8 主軸濾網全保留｜0設定一鍵秒開
+# app.py — 終極極簡暴力版｜全 Yahoo 引擎防卡死｜保留 1~8 主軸濾網
 import io
 import math
 import time
@@ -15,9 +15,9 @@ import streamlit.components.v1 as components
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
-# UI / THEME (冷酷黑灰，完全隱藏側邊欄)
+# UI / THEME (冷酷黑灰，完全隱藏設定)
 # =========================
-st.set_page_config(page_title="起漲戰情室｜極簡暴力", page_icon="🧊", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室｜極簡暴力", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
@@ -67,74 +67,84 @@ def calc_limit_up(prev_close, limit_pct):
     return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 # =========================
-# ENGINE 1: 股票清單 (防彈雙備援)
+# ENGINE 1: 股票清單 (GitHub 純淨版，絕對不被擋)
 # =========================
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def get_stock_list():
     meta = {}
-    # 來源 1: 證交所/櫃買中心官方 OpenAPI
-    try:
-        r1 = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=5, verify=False)
-        for item in r1.json():
-            if re.match(r"^\d{4,6}$", item["公司代號"]): meta[item["公司代號"]] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "tse"}
-        r2 = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=5, verify=False)
-        for item in r2.json():
-            if re.match(r"^\d{4,6}$", item["公司代號"]): meta[item["公司代號"]] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "otc"}
-        if len(meta) > 500: return meta
-    except: pass
-
-    # 來源 2: GitHub 備援
-    urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
-            ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
-    for ex, url in urls:
+    urls = [
+        ("上市", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
+        ("上櫃", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")
+    ]
+    for market, url in urls:
         try:
-            r = requests.get(url, timeout=5, verify=False)
+            r = requests.get(url, timeout=10, verify=False)
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), on_bad_lines="skip")
+            if "code" not in df.columns:
+                df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), header=None)
+                df.columns = ["type","code","name","ISIN","start","market","group","CFI"][:df.shape[1]]
             for _, row in df.iterrows():
-                c = str(row.iloc[1] if len(row)>1 else "").strip()
-                if re.match(r"^\d{4,6}$", c): meta[c] = {"name": str(row.iloc[2]), "ind": str(row.iloc[6]) if len(row)>6 else "", "ex": ex}
+                c = str(row.get("code", "")).strip()
+                if re.match(r"^\d{4,6}$", c): 
+                    meta[c] = {
+                        "name": str(row.get("name", "")).strip(), 
+                        "ind": str(row.get("group", "")).strip() or "未分類", 
+                        "ex": "TW" if market == "上市" else "TWO"
+                    }
         except: pass
-    if not meta: raise ValueError("完全無法連線取得股票清單，請確認網路或稍後再試。")
+    if not meta: raise ValueError("無法取得股票清單，請確認網路連線。")
     return meta
 
 # =========================
-# ENGINE 2: MIS 極速快篩全市場
+# ENGINE 2: 全市場 YFinance 極速快篩 (取代會卡死的 MIS)
 # =========================
-def fast_mis_scan(meta_dict):
-    s = requests.Session()
-    s.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers={"User-Agent": "Mozilla/5.0"}, timeout=5, verify=False)
-    codes = list(meta_dict.keys())
-    rows = []
+def fast_yahoo_scan(meta_dict, status_placeholder):
+    sym_to_code = {f"{c}.{v['ex']}": c for c, v in meta_dict.items()}
+    syms = list(sym_to_code.keys())
     
-    for i in range(0, len(codes), 120):
-        chunk = codes[i:i+120]
-        ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
-        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
+    status_placeholder.update(label=f"📡 正在向 Yahoo 批次索取 {len(syms)} 檔即時報價 (絕不卡死)...", state="running")
+    
+    rows = []
+    # 批次抓取 5 天日線，獲取昨收與今價
+    try:
+        raw = yf.download(tickers=" ".join(syms), period="5d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
+    except Exception as e:
+        raise ValueError(f"Yahoo 連線失敗: {e}")
+
+    for sym in syms:
         try:
-            r = s.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5, verify=False)
-            for q in r.json().get("msgArray", []):
-                last, upper, vol = q.get("z"), q.get("u"), q.get("v")
-                if not last or last == "-" or not upper or upper == "-": continue
-                last, upper, vol = float(last), float(upper), float(vol or 0)
-                
-                # 【極簡暴力快篩】：盤中量 > 1000張，且距離漲停在 2.5% 以內
-                dist = ((upper - last) / upper) * 100
-                if vol >= 1000 and dist <= 2.5:
-                    rows.append({"code": q.get("c"), "last": last, "upper": upper, "dist": dist, "vol_lots": int(vol), "yday": float(q.get("y", 0))})
-        except: time.sleep(0.05)
+            df = raw[sym].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw.dropna()
+            if len(df) < 2: continue
+            
+            last = float(df["Close"].iloc[-1])
+            prev_close = float(df["Close"].iloc[-2])
+            vol_lots = int(float(df["Volume"].iloc[-1]) / 1000)
+            
+            # 【極簡暴力濾網】：只留盤中量 > 1000張，且距離漲停 < 3.0%
+            limit_up = calc_limit_up(prev_close, 0.10)
+            dist = ((limit_up - last) / limit_up) * 100
+            
+            if vol_lots >= 1000 and dist <= 3.0:
+                rows.append({
+                    "code": sym_to_code[sym], "last": last, "upper": limit_up, 
+                    "dist": dist, "vol_lots": vol_lots, "yday": prev_close
+                })
+        except: continue
+        
     return pd.DataFrame(rows)
 
 # =========================
-# ENGINE 3: YFinance 日線與 5分K (套用 1~8 神級濾網)
+# ENGINE 3: YFinance 日線與 5分K 深度濾網 (套用 1~8)
 # =========================
-def core_filter_engine(candidates_df, meta_dict, now_ts):
+def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if candidates_df.empty: return pd.DataFrame()
-    syms = [f"{c}.TW" for c in candidates_df["code"]]
+    syms = [f"{c}.{meta_dict[c]['ex']}" for c in candidates_df["code"]]
     results = []
     frac = max(0.2, min(1.0, minutes_elapsed_in_session(now_ts) / 270.0))
 
+    status_placeholder.update(label=f"📊 鎖定 {len(syms)} 檔候選，正在進行 1~8 終極濾網運算...", state="running")
+    
     try:
-        # 一次抓齊日線與5分K，徹底解決轉圈圈 (threads=False 是防當機關鍵)
         raw_daily = yf.download(tickers=" ".join(syms), period="200d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
         raw_5m = yf.download(tickers=" ".join(syms), period="1d", interval="5m", group_by="ticker", auto_adjust=False, threads=False, progress=False)
     except:
@@ -142,9 +152,10 @@ def core_filter_engine(candidates_df, meta_dict, now_ts):
 
     for _, r in candidates_df.iterrows():
         c = r["code"]
+        sym = f"{c}.{meta_dict[c]['ex']}"
         try:
-            dfD = raw_daily[f"{c}.TW"].dropna() if isinstance(raw_daily.columns, pd.MultiIndex) else raw_daily.dropna()
-            df5 = raw_5m[f"{c}.TW"].dropna() if isinstance(raw_5m.columns, pd.MultiIndex) else raw_5m.dropna()
+            dfD = raw_daily[sym].dropna() if isinstance(raw_daily.columns, pd.MultiIndex) else raw_daily.dropna()
+            df5 = raw_5m[sym].dropna() if isinstance(raw_5m.columns, pd.MultiIndex) else raw_5m.dropna()
             if len(dfD) < 60 or df5.empty: continue
 
             # --- 日線特徵 ---
@@ -215,7 +226,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts):
     
     # 族群共振加分
     grp = out["族群"].value_counts()
-    out["潛力分"] += out["族群"].apply(lambda x: min(15.0, max(0.0, (int(grp.get(x, 1)) - 1) * 5.0)) if x else 0.0)
+    out["潛力分"] += out["族群"].apply(lambda x: min(15.0, max(0.0, (int(grp.get(x, 1)) - 1) * 5.0)) if x and x != "未分類" else 0.0)
     out["潛力分"] = out["潛力分"].clip(0, 100)
     
     out = out.sort_values(["潛力分", "距離漲停(%)"], ascending=[False, True]).reset_index(drop=True)
@@ -226,14 +237,13 @@ def core_filter_engine(candidates_df, meta_dict, now_ts):
 # MAIN APP (無腦一鍵啟動)
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">極簡暴力版 ｜ 隱藏繁瑣設定，一鍵貫穿 8 道主力濾網</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">極簡暴力版 ｜ 一鍵貫穿 8 道主力濾網，絕不轉圈圈</div>', unsafe_allow_html=True)
 
-# 巨大的啟動按鈕
 run_scan = st.button("🚀 啟動掃描 (自動鎖定第一根)", use_container_width=True)
 
 if run_scan:
-    # 🛡️ 加入 st.status，按下去的 0.1 秒就會跳出這個面板，絕對不會覺得沒反應！
-    with st.status("⚡ 系統運算中，請稍候...", expanded=True) as status:
+    # 🛡️ 加入 st.status，按下去的瞬間就會跳出面板，告訴你進度！
+    with st.status("⚡ 系統極速運算中，請稍候...", expanded=True) as status:
         
         status.update(label="📦 1/3 載入台股最新清單...", state="running")
         try:
@@ -242,16 +252,14 @@ if run_scan:
             status.update(label="❌ 清單載入失敗", state="error")
             st.error(str(e)); st.stop()
             
-        status.update(label="📡 2/3 向證交所進行光速快篩 (尋找有量且快漲停的標的)...", state="running")
-        pre_df = fast_mis_scan(meta)
+        pre_df = fast_yahoo_scan(meta, status)
         
         if pre_df.empty:
             status.update(label="✅ 掃描完畢", state="complete")
             st.info("😴 目前全市場沒有符合「爆量且接近漲停」的標的。")
             st.stop()
             
-        status.update(label=f"📊 3/3 鎖定 {len(pre_df)} 檔候選，套用 1~8 神級濾網與連板計算...", state="running")
-        final_res = core_filter_engine(pre_df, meta, now_taipei())
+        final_res = core_filter_engine(pre_df, meta, now_taipei(), status)
         
         status.update(label="✅ 掃描與計算完成！", state="complete")
 
@@ -277,18 +285,19 @@ if run_scan:
                         </div>
                         <div class="price">{r['現價']:.2f}</div>
                     </div>
-                    <div class="small-note">
+                    <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af;">
                         <span>距漲停: <b style="color:#e5e7eb;">{r['距離漲停(%)']:.2f}%</b></span>
                         <span>爆量: <b style="color:#f87171;">{r['盤中爆量倍數']:.1f}x</b></span>
                     </div>
-                    <div class="small-note" style="margin-top:4px;">
+                    <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af; margin-top:6px;">
                         <span>潛力分: <b style="color:#a3e635;">{r['潛力分']:.1f}</b></span>
-                        <span>開板次數: <b>{r['開板次數']}</b></span>
+                        <span>開板: <b>{r['開板次數']}</b></span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
                 
         # 匯出 CSV 按鈕
+        st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
         csv = final_res.to_csv(index=False).encode('utf-8-sig')
         st.download_button("📥 匯出今日戰情報表 (CSV)", data=csv, file_name=f"第一根漲停_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv", use_container_width=True)
         
