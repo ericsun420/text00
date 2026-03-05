@@ -20,26 +20,54 @@ CSS = """
 <style>
 :root{
   --bg:#07080b;
+  --panel:#0b0d12;
   --card:#0f1116;
   --card2:#0b0d12;
   --text:#e5e7eb;
   --muted:#9ca3af;
-
-  /* 冷酷黑灰主調 */
-  --accent:#e5e7eb;
-  --accent2:#6b7280;
-  --ok:#a3e635;
-  --warn:#cbd5e1;
-  --bad:#fb7185;
-
-  --line:rgba(148,163,184,.14);
+  --line:rgba(148,163,184,.16);
+  --shadow: 0 16px 40px rgba(0,0,0,.35);
 }
 
-/* 全局背景 */
-.main { background: var(--bg); }
-.block-container { padding-top: 1.2rem; padding-bottom: 2.2rem; }
+/* ✅ 1) 強制整個 App（含白底）變深色 */
+[data-testid="stAppViewContainer"]{
+  background: var(--bg) !important;
+  color: var(--text) !important;
+}
+.main{
+  background: var(--bg) !important;
+}
+.block-container{
+  padding-top: 1.2rem;
+  padding-bottom: 2.2rem;
+}
 
-/* Header */
+/* ✅ 2) Header / Toolbar 變黑灰 */
+[data-testid="stHeader"]{
+  background: rgba(7,8,11,.80) !important;
+  border-bottom: 1px solid var(--line) !important;
+}
+[data-testid="stToolbar"]{
+  background: transparent !important;
+}
+
+/* ✅ 3) Sidebar 變黑灰（你截圖左邊白底的元兇） */
+[data-testid="stSidebar"]{
+  background: var(--panel) !important;
+  border-right: 1px solid var(--line) !important;
+}
+[data-testid="stSidebar"] *{
+  color: var(--text) !important;
+}
+
+/* Sidebar 裡的 label 讓它更乾淨 */
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span{
+  color: var(--muted) !important;
+}
+
+/* ✅ 4) 你原本的戰情室排版（保留但改成更耐看黑灰） */
 .header-wrap{
   display:flex; align-items:flex-end; justify-content:space-between;
   gap:18px; padding: 10px 4px 6px 4px;
@@ -54,19 +82,17 @@ CSS = """
   margin:6px 0 0 2px; color: var(--muted); font-size: 14px;
 }
 
-/* 右上角 pill */
 .pill{
   display:inline-flex; align-items:center; gap:8px;
   padding: 8px 12px; border:1px solid var(--line);
   border-radius: 999px; color: var(--text);
-  background: rgba(15,17,22,.72);
+  background: rgba(15,17,22,.85);
   font-size: 13px;
-  box-shadow: 0 10px 30px rgba(0,0,0,.25);
+  box-shadow: var(--shadow);
 }
 .pill b{ color: var(--text); }
 .pill .dot{ width:8px; height:8px; border-radius:999px; background:#9ca3af; display:inline-block; }
 
-/* 卡片 grid */
 .grid{
   display:grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -74,20 +100,18 @@ CSS = """
   margin: 14px 0 6px 0;
 }
 .card{
-  background: linear-gradient(180deg, rgba(15,17,22,.92), rgba(11,13,18,.92));
+  background: linear-gradient(180deg, rgba(15,17,22,.94), rgba(11,13,18,.94));
   border:1px solid var(--line);
   border-radius: 16px;
   padding: 14px 14px 12px 14px;
-  box-shadow: 0 16px 40px rgba(0,0,0,.35);
+  box-shadow: var(--shadow);
 }
 .k{ color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .v{ color: var(--text); font-size: 20px; font-weight: 800; }
 .v small{ color: var(--muted); font-weight: 600; font-size: 12px; margin-left: 6px;}
 
-/* 分隔線 */
 .hr{ height:1px; background: var(--line); margin: 12px 0; }
 
-/* 橫幅提示 */
 .banner{
   background: rgba(148,163,184,.08);
   border: 1px solid rgba(148,163,184,.22);
@@ -98,7 +122,6 @@ CSS = """
 }
 .banner b{ color: #fff; }
 
-/* TOP 卡片資訊 */
 .metric{
   display:flex; justify-content:space-between; align-items:flex-end;
   gap:10px;
@@ -109,48 +132,55 @@ CSS = """
 .metric .tag{
   font-size: 12px; padding: 4px 8px; border-radius: 999px;
   border:1px solid var(--line); color: var(--text);
-  background: rgba(15,17,22,.7);
+  background: rgba(15,17,22,.8);
 }
 .metric .price{ font-size: 22px; font-weight: 900; color: var(--text); line-height: 1; }
 .metric .chg{ font-size: 12px; color: var(--muted); }
 
-/* 按鈕：冷酷黑灰 */
+/* ✅ 5) 控件：按鈕/下拉/輸入框都改黑灰 */
 .stButton>button{
   border-radius: 14px !important;
-  border: 1px solid rgba(203,213,225,.28) !important;
-  background: linear-gradient(90deg, rgba(148,163,184,.18), rgba(107,114,128,.12)) !important;
+  border: 1px solid rgba(203,213,225,.26) !important;
+  background: linear-gradient(90deg, rgba(148,163,184,.16), rgba(107,114,128,.10)) !important;
   color: var(--text) !important;
   font-weight: 800 !important;
   padding: 10px 14px !important;
 }
 .stButton>button:hover{
-  border: 1px solid rgba(203,213,225,.45) !important;
-  background: linear-gradient(90deg, rgba(148,163,184,.24), rgba(107,114,128,.16)) !important;
+  border: 1px solid rgba(203,213,225,.42) !important;
+  background: linear-gradient(90deg, rgba(148,163,184,.22), rgba(107,114,128,.14)) !important;
 }
 
-/* 下拉與輸入框更貼黑灰 */
 .stSelectbox>div>div,
 .stTextInput>div>div,
 .stNumberInput>div>div{
   border-radius: 14px !important;
-  border: 1px solid rgba(148,163,184,.20) !important;
-  background: rgba(15,17,22,.72) !important;
+  border: 1px solid rgba(148,163,184,.22) !important;
+  background: rgba(15,17,22,.88) !important;
   color: var(--text) !important;
 }
 
-/* 小字 */
-.small-note{ color: var(--muted); font-size: 12px; }
-
-/* 表格（dataframe）背景更黑 */
+/* ✅ 6) dataframe / expander 也黑灰 */
 [data-testid="stDataFrame"]{
   border-radius: 16px;
   border: 1px solid var(--line);
   overflow: hidden;
+  background: rgba(15,17,22,.88) !important;
+}
+[data-testid="stExpander"]{
+  border: 1px solid var(--line) !important;
+  border-radius: 16px !important;
+  background: rgba(15,17,22,.70) !important;
+}
+.small-note{ color: var(--muted); font-size: 12px; }
+
+/* ✅ 7) 文字（避免有些地方還是黑字） */
+h1,h2,h3,h4,h5,h6, p, span, div{
+  color: inherit;
 }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
-
 # =========================
 # 時間工具
 # =========================
@@ -585,3 +615,4 @@ if run_scan:
             )
 
 st.caption("懶人版設計：只留『風險等級』與『股票池』；其餘條件內建。若要專業版我也能再做。")
+
