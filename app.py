@@ -1,4 +1,4 @@
-# app.py — 終極極簡暴力版｜全 Yahoo 引擎防卡死｜保留 1~8 主軸濾網
+# app.py — 終極極簡暴力版｜嚴格篩除權證｜分批防卡死引擎
 import io
 import math
 import time
@@ -67,70 +67,83 @@ def calc_limit_up(prev_close, limit_pct):
     return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 # =========================
-# ENGINE 1: 股票清單 (GitHub 純淨版，絕對不被擋)
+# ENGINE 1: 股票清單 (嚴格過濾 4萬檔權證)
 # =========================
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def get_stock_list():
     meta = {}
-    urls = [
-        ("上市", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
-        ("上櫃", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")
-    ]
-    for market, url in urls:
+    # 來源 1: 官方 OpenAPI
+    try:
+        r1 = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=5, verify=False)
+        for item in r1.json():
+            c = str(item.get("公司代號", "")).strip()
+            # 【致命修正】：嚴格要求代號必須是 4 位數字，斬殺所有權證與下市股
+            if len(c) == 4 and c.isdigit(): 
+                meta[c] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "TW"}
+        r2 = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=5, verify=False)
+        for item in r2.json():
+            c = str(item.get("公司代號", "")).strip()
+            if len(c) == 4 and c.isdigit(): 
+                meta[c] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "TWO"}
+        if len(meta) > 1000: return meta
+    except: pass
+
+    # 來源 2: GitHub 備援
+    urls = [("TW", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
+            ("TWO", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
+    for ex, url in urls:
         try:
-            r = requests.get(url, timeout=10, verify=False)
+            r = requests.get(url, timeout=5, verify=False)
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), on_bad_lines="skip")
-            if "code" not in df.columns:
-                df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), header=None)
-                df.columns = ["type","code","name","ISIN","start","market","group","CFI"][:df.shape[1]]
             for _, row in df.iterrows():
-                c = str(row.get("code", "")).strip()
-                if re.match(r"^\d{4,6}$", c): 
-                    meta[c] = {
-                        "name": str(row.get("name", "")).strip(), 
-                        "ind": str(row.get("group", "")).strip() or "未分類", 
-                        "ex": "TW" if market == "上市" else "TWO"
-                    }
+                c = str(row.iloc[1] if len(row)>1 else "").strip()
+                if len(c) == 4 and c.isdigit(): 
+                    meta[c] = {"name": str(row.iloc[2]), "ind": str(row.iloc[6]) if len(row)>6 else "", "ex": ex}
         except: pass
-    if not meta: raise ValueError("無法取得股票清單，請確認網路連線。")
+    if not meta: raise ValueError("完全無法連線取得股票清單，請確認網路或稍後再試。")
     return meta
 
 # =========================
-# ENGINE 2: 全市場 YFinance 極速快篩 (取代會卡死的 MIS)
+# ENGINE 2: 分批 Yahoo 快篩 (保證進度條會跑)
 # =========================
 def fast_yahoo_scan(meta_dict, status_placeholder):
     sym_to_code = {f"{c}.{v['ex']}": c for c, v in meta_dict.items()}
     syms = list(sym_to_code.keys())
     
-    status_placeholder.update(label=f"📡 正在向 Yahoo 批次索取 {len(syms)} 檔即時報價 (絕不卡死)...", state="running")
-    
     rows = []
-    # 批次抓取 5 天日線，獲取昨收與今價
-    try:
-        raw = yf.download(tickers=" ".join(syms), period="5d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
-    except Exception as e:
-        raise ValueError(f"Yahoo 連線失敗: {e}")
-
-    for sym in syms:
-        try:
-            df = raw[sym].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw.dropna()
-            if len(df) < 2: continue
-            
-            last = float(df["Close"].iloc[-1])
-            prev_close = float(df["Close"].iloc[-2])
-            vol_lots = int(float(df["Volume"].iloc[-1]) / 1000)
-            
-            # 【極簡暴力濾網】：只留盤中量 > 1000張，且距離漲停 < 3.0%
-            limit_up = calc_limit_up(prev_close, 0.10)
-            dist = ((limit_up - last) / limit_up) * 100
-            
-            if vol_lots >= 1000 and dist <= 3.0:
-                rows.append({
-                    "code": sym_to_code[sym], "last": last, "upper": limit_up, 
-                    "dist": dist, "vol_lots": vol_lots, "yday": prev_close
-                })
-        except: continue
+    batch_size = 200 # 分批向 Yahoo 要資料，絕對不會卡死
+    total_batches = math.ceil(len(syms) / batch_size)
+    
+    for i in range(0, len(syms), batch_size):
+        chunk = syms[i:i+batch_size]
+        batch_num = (i // batch_size) + 1
+        status_placeholder.update(label=f"📡 全市場快篩中：正在下載第 {batch_num} / {total_batches} 批次 ({len(syms)} 檔真股票)...", state="running")
         
+        try:
+            raw = yf.download(tickers=" ".join(chunk), period="5d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
+            for sym in chunk:
+                try:
+                    df = raw[sym].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw.dropna()
+                    if len(df) < 2: continue
+                    
+                    last = float(df["Close"].iloc[-1])
+                    prev_close = float(df["Close"].iloc[-2])
+                    vol_lots = int(float(df["Volume"].iloc[-1]) / 1000)
+                    
+                    # 【極簡暴力濾網】：只留盤中量 > 1000張，且距離漲停 < 3.0%
+                    limit_up = calc_limit_up(prev_close, 0.10)
+                    dist = ((limit_up - last) / limit_up) * 100
+                    
+                    if vol_lots >= 1000 and dist <= 3.0:
+                        rows.append({
+                            "code": sym_to_code[sym], "last": last, "upper": limit_up, 
+                            "dist": dist, "vol_lots": vol_lots, "yday": prev_close
+                        })
+                except: continue
+        except Exception:
+            time.sleep(0.1)
+            continue
+            
     return pd.DataFrame(rows)
 
 # =========================
@@ -201,7 +214,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 
             # 【爆量倍數】
             vol_ratio = (r["vol_lots"] * 1000) / (vol_ma20 * frac + 1e-9)
-            if vol_ratio < 1.8: continue # 爆量不足 1.8倍 淘汰
+            if vol_ratio < 1.5: continue # 爆量不足 1.5倍 淘汰
 
             # --- 綜合潛力計分 (0~100) ---
             score = 0.0
@@ -237,21 +250,21 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 # MAIN APP (無腦一鍵啟動)
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">極簡暴力版 ｜ 一鍵貫穿 8 道主力濾網，絕不轉圈圈</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">極簡暴力版 ｜ 斬除權證干擾，一鍵貫穿 8 道主力濾網</div>', unsafe_allow_html=True)
 
 run_scan = st.button("🚀 啟動掃描 (自動鎖定第一根)", use_container_width=True)
 
 if run_scan:
-    # 🛡️ 加入 st.status，按下去的瞬間就會跳出面板，告訴你進度！
     with st.status("⚡ 系統極速運算中，請稍候...", expanded=True) as status:
         
-        status.update(label="📦 1/3 載入台股最新清單...", state="running")
+        status.update(label="📦 1/3 載入台股最新清單 (已濾除權證)...", state="running")
         try:
             meta = get_stock_list()
         except Exception as e:
             status.update(label="❌ 清單載入失敗", state="error")
             st.error(str(e)); st.stop()
             
+        # 把原本的 4萬多檔，直接縮減成乾淨的 1700多檔
         pre_df = fast_yahoo_scan(meta, status)
         
         if pre_df.empty:
