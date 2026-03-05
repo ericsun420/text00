@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 7.1 終極破壁版｜全中文專業介面｜Ultra Pro
+# app.py — 起漲戰情室｜戰神 7.2 終極破壁版｜語法修復｜全中文專業介面｜Ultra Pro
 import io
 import math
 import time
@@ -212,7 +212,8 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
             c = q.get("c")
             if not c or c not in meta_dict: continue 
             try:
-                z, u, v, y = q.get("z"), u=q.get("u"), v=q.get("v"), y=q.get("y")
+                # ✅ 修復了這裡的語法錯誤
+                z, u, v, y = q.get("z"), q.get("u"), q.get("v"), q.get("y")
                 if z in (None, "", "-", "—") or u in (None, "", "-", "—") or y in (None, "", "-", "—", "0"):
                     mis_diag["mis_parse_fail"] += 1; continue
                 last, upper, prev_close, vol_sh = float(z), float(u), float(y), float(v or 0)
@@ -376,7 +377,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # MAIN
 # =========================
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v7.1</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v7.2</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
