@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神修正版 3.0｜1~N 根連板通吃｜精準漲停判斷
+# app.py — 起漲戰情室｜戰神修正版 3.1｜1~N 根連板通吃｜瑞軒型資金一致性濾網
 import io
 import math
 import time
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="起漲戰情室｜戰神修正版 3.0", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室｜戰神修正版 3.1", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
@@ -47,7 +47,6 @@ st.markdown(CSS, unsafe_allow_html=True)
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 
-# 【核心修正】: 分段式時間比例，防止負值
 def get_vol_frac(ts):
     m = int((datetime.combine(ts.date(), ts.time()) - datetime.combine(ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
@@ -77,7 +76,7 @@ def split_nums(s):
     return out
 
 # =========================
-# ENGINE 1: 股票清單
+# ENGINE 1: 股票清單 (穩健解析)
 # =========================
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def get_stock_list():
@@ -99,6 +98,7 @@ def get_stock_list():
                 if len(code) == 4 and code.isdigit():
                     stype = str(row[t_col])
                     if "權證" in stype or "ETF" in stype: continue
+                    # 【核心修正 1】: 更強健的族群解析
                     ind = str(row.get(g_col, "")).strip()
                     if not ind or ind.lower() == "nan": ind = "未分類"
                     meta[code] = {"name": str(row[n_col]), "ind": ind, "ex": ex}
@@ -132,6 +132,7 @@ def fast_mis_scan(meta_dict, status_placeholder):
                 c = q.get("c")
                 if not c or c not in meta_dict: continue
                 z, u, v, y = q.get("z"), q.get("u"), q.get("v"), q.get("y")
+                # 【核心修正 2】: 排除 upper <= 0
                 if not z or z == "-" or not u or u == "-" or not y or y == "-" or float(y) == 0 or float(u) <= 0: continue
                 
                 last, upper, prev_close = float(z), float(u), float(y)
@@ -158,10 +159,11 @@ def fast_mis_scan(meta_dict, status_placeholder):
 def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if candidates_df.empty: return pd.DataFrame()
     
-    # 取前 80 檔送 Yahoo
+    # 僅取前 80 檔最強標的
     candidates_df = candidates_df.sort_values(["dist", "vol_lots"], ascending=[True, False]).head(80)
     
-    stats = {"Total": len(candidates_df), "YF_Fail": 0, "Hype": 0, "Pullback": 0, "VolRatio": 0, "LockFail": 0, "Err": 0}
+    # 【核心修正 1 & 2】: 統計邏輯修正，加入 NotLocked 與 Err
+    stats = {"Total": len(candidates_df), "NotLocked": 0, "Hype": 0, "Pullback": 0, "VolRatio": 0, "WeakClose": 0, "Err": 0, "YF_Fail": 0}
     syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
     status_placeholder.update(label=f"📊 正在深度運算 {len(syms)} 檔候選股...", state="running")
     
@@ -181,11 +183,11 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             if len(dfD) < 30: 
                 stats["YF_Fail"] += 1; continue
 
-            hist_ret = dfD["Close"].pct_change().dropna()
+            # 【核心修正 3】: 移除冗餘 pct_change
             has_today = dfD.index[-1].date() == today_date
             past_df = dfD.iloc[:-1].copy() if has_today else dfD.copy()
             
-            # 【逼近法判斷制度與連板】
+            # 逼近法判斷制度與連板
             past_boards = 0
             if len(past_df) >= 10:
                 past_10 = past_df.tail(10)
@@ -205,10 +207,9 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             elif past_boards == 2: stage_label, stage_class, stage_bonus = "⚠️ 第三連", "tag-stage3", -5.0
             else: stage_label, stage_class, stage_bonus = f"💀 第{past_boards+1}連", "tag-stage4", -15.0
 
-            # 【核心修正 1 & 2】: Hype 邏輯改用逼近法，且修正 Loop 下限
+            # Hype 邏輯：只有第一根才排除近 10 日漲停股
             if past_boards == 0:
                 had_limit_past = False
-                # 下限改為 1，防止 j-1 取到 -1
                 for j in range(len(past_df)-1, max(1, len(past_df)-10), -1):
                     cp_j, pp_j, hp_j = float(past_df["Close"].iloc[j]), float(past_df["Close"].iloc[j-1]), float(past_df["High"].iloc[j])
                     l10_j, l20_j = calc_limit_up(pp_j, 0.10), calc_limit_up(pp_j, 0.20)
@@ -216,38 +217,41 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                     d20_j = min(abs(cp_j - l20_j), abs(hp_j - l20_j))
                     use20_j = (d20_j < d10_j) and (d20_j <= 2 * tw_tick(l20_j))
                     lim_j = l20_j if use20_j else l10_j
-                    if cp_j >= (lim_j - tw_tick(lim_j)): 
-                        had_limit_past = True; break
-                if had_limit_past: 
-                    stats["Hype"] += 1; continue
+                    if cp_j >= (lim_j - tw_tick(lim_j)): had_limit_past = True; break
+                if had_limit_past: stats["Hype"] += 1; continue
 
-            # 鎖死品質 (考慮無賣盤與動態賣盤比例)
+            # 【核心修正 3 & 4】: 鎖死品質判定進化 (處理資料不足情況)
             bid_lots1 = int(r["bid_v1"]/1000)
             ask_lots1 = int(r["ask_v1"]/1000)
             has_ask = r["ask_p1"] > 0
             
-            is_locked = (r["bid_p1"] >= r["upper"] - tw_tick(r["upper"])) and (bid_lots1 >= 200)
-            ask_at_upper = (not has_ask) or (r["ask_p1"] >= r["upper"] - tw_tick(r["upper"]))
+            # 資料不足防禦：如果賣盤價存在但量為 0，視為資料異常，不計入強鎖
+            if has_ask and r["ask_v1"] <= 0:
+                is_locked = False
+            else:
+                is_locked = (r["bid_p1"] >= r["upper"] - tw_tick(r["upper"])) and (bid_lots1 >= 200)
+                ask_at_upper = (not has_ask) or (r["ask_p1"] >= r["upper"] - tw_tick(r["upper"]))
+                if is_locked:
+                    if not ask_at_upper: is_locked = False
+                    elif ask_lots1 > max(150, bid_lots1 * 0.6): is_locked = False
             
-            if is_locked:
-                if not ask_at_upper: is_locked = False
-                elif ask_lots1 > max(150, bid_lots1 * 0.6): is_locked = False
-            
-            # 【核心修正 3】: 補上 LockFail 統計
-            if not is_locked:
-                stats["LockFail"] += 1
+            if not is_locked: stats["NotLocked"] += 1
 
+            # 爆量倍數
             vol_ma20_lots = float(dfD["Volume"].rolling(20).mean().iloc[-1]) / 1000
             vol_ratio = r["vol_lots"] / (vol_ma20_lots * frac + 1e-9)
-            if vol_ratio < 1.3: 
-                stats["VolRatio"] += 1; continue
+            if vol_ratio < 1.3: stats["VolRatio"] += 1; continue
 
+            # 回落幅度
             pullback = (r["high"] - r["last"]) / max(1e-9, r["high"])
-            if pullback > 0.0039: 
-                stats["Pullback"] += 1; continue
+            if pullback > 0.0039: stats["Pullback"] += 1; continue
 
+            # 【核心建議修正】: 瑞軒型資金一致性濾網 (收盤位置)
             rng = max(1e-9, r["high"] - r["low"])
             close_pos = (r["last"] - r["low"]) / rng
+            if close_pos < 0.80: stats["WeakClose"] += 1; continue
+
+            # 綜合計分
             score = 40.0 + stage_bonus + (15.0 if is_locked else 0.0)
             score += 15.0 * min(1.0, max(0.0, (close_pos - 0.85) / 0.15))
             score += 15.0 * min(1.0, max(0.0, (vol_ratio - 1.5) / 2.5))
@@ -259,8 +263,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                 "買一": bid_lots1, "賣一": ask_lots1, "連板序號": past_boards + 1, "潛力分": max(0.0, min(100.0, score)),
                 "階段": stage_label, "Class": stage_class
             })
-        except: 
-            stats["Err"] += 1
+        except: stats["Err"] += 1
 
     with st.expander("📊 掃描統計戰報 (淘汰原因追蹤)", expanded=False):
         st.json(stats)
@@ -270,7 +273,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 # MAIN APP
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">戰神修正版 3.0 ｜ 精準逼近法 ｜ 鎖死品質動態過濾</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">戰神修正版 3.1 ｜ 瑞軒型連板追蹤 ｜ 資金一致性過濾</div>', unsafe_allow_html=True)
 
 run_scan = st.button("🚀 啟動掃描 (自動鎖定起漲先機)", use_container_width=True)
 
