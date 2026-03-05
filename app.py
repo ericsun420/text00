@@ -1,8 +1,7 @@
-# app.py — 起漲戰情室｜戰神 7.5 網路正骨版｜Session 隔離｜精準 Headers｜Ultra Pro
+# app.py — 起漲戰情室｜戰神 v8.0 企業監控版｜優雅降級｜狀態探針｜Apple Pro
 import io
 import math
 import time
-import random
 from datetime import datetime, timedelta, time as dtime
 from collections import deque
 
@@ -14,7 +13,6 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
-# 隱藏 SSL 警告，保持版面乾淨 (僅針對 MIS)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
@@ -27,14 +25,13 @@ def diag_init():
         "yf_symbols": 0, "yf_returned": 0, "yf_fail": 0, "other_err": 0,
         "yf_bulk_fail": 0, "yf_rescue_used": 0,
         "yf_parts_ok": 0, "yf_parts_fail": 0,
-        "last_errors": deque(maxlen=5),
+        "last_errors": deque(maxlen=8), # 稍微加大以容納更多觀測
         "t_meta": 0.0, "t_mis": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0
     }
 
 def diag_err(diag, e, tag="ERR"):
     diag["last_errors"].append(f"[{tag}] {type(e).__name__}: {e}")
 
-# ✅ 修正 1：GitHub 專用乾淨 Headers
 def get_github_headers():
     return {
         "User-Agent": "Mozilla/5.0",
@@ -43,16 +40,11 @@ def get_github_headers():
         "Connection": "keep-alive",
     }
 
-# ✅ 修正 2：MIS 專用 Headers (保持偽裝，但不跨域污染)
+# ✅ 修正 3：固定 UA 以確保同一環境可重現性
+MIS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 def get_mis_headers():
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-    ]
     return {
-        "User-Agent": random.choice(user_agents),
+        "User-Agent": MIS_UA,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "X-Requested-With": "XMLHttpRequest",
@@ -60,17 +52,24 @@ def get_mis_headers():
         "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"
     }
 
-# ✅ 修正 3：Session 層級綁定 Headers，並移除 403 挑釁重試
 def make_retry_session(base_headers=None):
     s = requests.Session()
-    # 移除 403，403 代表硬拒絕，不要硬衝
     retry = Retry(total=3, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",), respect_retry_after_header=True)
     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     if base_headers:
-        s.headers.update(base_headers) # ✅ Session 建立時就鎖定一套身份
+        s.headers.update(base_headers)
     return s
+
+# ✅ 修正 4：SSL 優雅降級模組
+def mis_get(session, url, timeout, diag=None):
+    try:
+        return session.get(url, timeout=timeout, verify=True)
+    except requests.exceptions.SSLError as e:
+        if diag is not None:
+            diag_err(diag, e, "MIS_SSL_DOWNGRADE")
+        return session.get(url, timeout=timeout, verify=False)
 
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def yf_download_daily(syms):
@@ -90,26 +89,12 @@ def yf_download_daily(syms):
 st.set_page_config(page_title="起漲戰情室 Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
-    [data-testid="stAppViewContainer"], .main { 
-        background: #050505 !important; 
-        background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important;
-        color: #e2e8f0 !important; 
-    }
+    [data-testid="stAppViewContainer"], .main { background: #050505 !important; background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important; color: #e2e8f0 !important; }
     .block-container { padding-top: 2rem; max-width: 1280px; }
     [data-testid="stSidebar"] { display: none !important; }
     .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
     .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px;}
-    .pro-card { 
-        background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); 
-        backdrop-filter: blur(24px); 
-        border: 1px solid rgba(255, 255, 255, 0.05); 
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 20px; 
-        padding: 24px; 
-        margin-bottom: 16px; 
-        transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
-        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
-    }
+    .pro-card { background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); backdrop-filter: blur(24px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 24px; margin-bottom: 16px; transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
     .pro-card:hover { border-color: rgba(56, 189, 248, 0.4); transform: translateY(-5px) scale(1.01); box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15); }
     .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
     .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
@@ -167,13 +152,14 @@ def split_nums(s):
 # =========================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list():
-    # ✅ 修正 4：GitHub 使用乾淨 Headers，且恢復 SSL 驗證 (verify=True)
-    meta, session = {}, make_retry_session(base_headers=get_github_headers())
+    meta, errors = {}, []
+    session = make_retry_session(base_headers=get_github_headers())
     urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
             ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
         try:
-            r = session.get(url, timeout=15, verify=True); r.raise_for_status()
+            r = session.get(url, timeout=15, verify=True)
+            r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
             c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
@@ -182,16 +168,17 @@ def get_stock_list():
                 if t_col and ("權證" in stype or "ETF" in stype): continue
                 code = str(row[c_col]).strip()
                 if len(code) == 4 and code.isdigit(): meta[code] = {"name": str(row[n_col]), "ex": ex}
-        except: pass
-    return meta
+        except Exception as e:
+            # ✅ 修正 6：不再裸吞例外，精準紀錄 Meta 錯誤痕跡
+            errors.append(f"{ex} - {str(e)}")
+    return meta, errors
 
 def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
-    # ✅ 修正 5：建立 MIS 專用 Session，綁定一致身份，不重複重骰 UA
-    session, rows, err_mis = make_retry_session(base_headers=get_mis_headers()), [], 0
+    session, rows = make_retry_session(base_headers=get_mis_headers()), []
+    # ✅ 修正 1：移除無用的 err_mis，單純回傳 df 與 diag
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    # 針對 MIS 保留 verify=False 以免遇到證交所憑證問題
-    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=10, verify=False)
+    try: mis_get(session, "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=10, diag=diag)
     except Exception as e: diag_err(diag, e, "MIS_WARMUP")
 
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
@@ -205,11 +192,25 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
         status_placeholder.update(label=f"📡 穿透雷達掃描中... ({i}/{len(codes)})", state="running")
+        
         try:
-            r = session.get(url, timeout=12, verify=False)
+            # ✅ 修正 2：加入 HTTP Status 與 Content-Type 探針
+            r = mis_get(session, url, timeout=12, diag=diag)
+            ct = (r.headers.get("Content-Type") or "").lower()
+            if r.status_code != 200:
+                mis_diag["mis_req_err"] += 1
+                diag_err(diag, Exception(f"HTTP_{r.status_code}"), "MIS_HTTP")
+                time.sleep(0.2); continue
+            if "json" not in ct:
+                mis_diag["mis_req_err"] += 1
+                diag_err(diag, Exception(f"NON_JSON ct={ct[:40]}"), "MIS_CT")
+                time.sleep(0.2); continue
+                
             data = r.json().get("msgArray", [])
-        except:
-            err_mis += 1; mis_diag["mis_req_err"] += 1; time.sleep(0.1); continue
+        except Exception as e:
+            mis_diag["mis_req_err"] += 1
+            diag_err(diag, e, "MIS_REQ_FAIL")
+            time.sleep(0.2); continue
 
         for q in data:
             mis_diag["mis_seen"] += 1
@@ -238,7 +239,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     if not df.empty:
         df = df.sort_values(["dist", "vol_sh"], ascending=[True, False]).drop_duplicates("code", keep="first")
     mis_diag["mis_rows"] = len(df)
-    return df, err_mis, mis_diag
+    return df, mis_diag
 
 def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloodline):
     stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "非連板標的": []}
@@ -268,8 +269,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 
     try:
         raw_daily = yf_download_daily(syms)
-        if raw_daily is None or getattr(raw_daily, "empty", False):
-            raise Exception("YF_BULK_EMPTY")
+        if raw_daily is None or getattr(raw_daily, "empty", False): raise Exception("YF_BULK_EMPTY")
         diag["yf_rescue_used"] = 0 
     except Exception as e:
         tag = "YF_BULK_EMPTY" if str(e) == "YF_BULK_EMPTY" else "YF_BULK_FAIL"
@@ -385,29 +385,44 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # MAIN
 # =========================
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v7.5 網路正骨版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v8.0 企業級監控版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 嚴格連板血統", value=True)
 
+# ✅ 修正 5：設定系統保護閥 (Cooldown)，防呆防手震連點
+now_time = time.time()
+last_run = st.session_state.get("last_run_ts", 0)
+cooldown_seconds = 15
+
 if st.button("🚀 啟動全戰區量化掃描"):
-    t0, diag = time.perf_counter(), diag_init()
-    with st.status("⚡ 建立安全連線與解析市場中...", expanded=True) as status:
-        t = time.perf_counter(); meta = get_stock_list()
-        diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
-        if len(meta) < 500: diag_err(diag, Exception(f"清單數量異常 ({len(meta)})"), "META_SUSPECT")
+    if now_time - last_run < cooldown_seconds:
+        st.warning(f"⏳ 系統冷卻防護中，為避免觸發風控，請等待 {int(cooldown_seconds - (now_time - last_run))} 秒後再執行...")
+    else:
+        st.session_state["last_run_ts"] = now_time
+        t0, diag = time.perf_counter(), diag_init()
         
-        t = time.perf_counter(); now_ts = now_taipei()
-        pre_df, mis_err, mis_diag = fast_mis_scan(meta, status, now_ts, is_test, diag)
-        diag["t_mis"] = time.perf_counter() - t; diag.update(mis_diag); diag["cand_total"] = mis_diag.get("mis_rows", len(pre_df))
-        
-        t = time.perf_counter()
-        final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag, use_bloodline)
-        diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
-        diag["total"] = time.perf_counter() - t0
-        status.update(label="✅ 掃描完成", state="complete")
-    st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test, "use_bloodline": use_bloodline}
+        with st.status("⚡ 建立安全連線與解析市場中...", expanded=True) as status:
+            t = time.perf_counter(); meta, meta_errs = get_stock_list()
+            diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
+            
+            # ✅ 將 Meta 錯誤導出至監控面板
+            for err in meta_errs: diag_err(diag, Exception(err), "META_ERR")
+            if len(meta) < 500: diag_err(diag, Exception(f"清單數量異常 ({len(meta)})"), "META_SUSPECT")
+            
+            t = time.perf_counter(); now_ts = now_taipei()
+            pre_df, mis_diag = fast_mis_scan(meta, status, now_ts, is_test, diag)
+            diag["t_mis"] = time.perf_counter() - t; diag.update(mis_diag); diag["cand_total"] = mis_diag.get("mis_rows", len(pre_df))
+            
+            t = time.perf_counter()
+            final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag, use_bloodline)
+            diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
+            diag["total"] = time.perf_counter() - t0
+            status.update(label="✅ 掃描完成", state="complete")
+            
+        st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test, "use_bloodline": use_bloodline}
+        st.rerun() # 刷新畫面消除冷卻警告
 
 scan = st.session_state.get("last_scan")
 if scan:
@@ -422,7 +437,7 @@ if scan:
     m3.metric("資料解析良率", f"{(d.get('mis_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
     m4.metric("系統異常阻擋", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
 
-    with st.expander("⚙️ 系統診斷與底層監控", expanded=False):
+    with st.expander("⚙️ 系統診斷與底層監控 (白盒分析)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("全市場掃描", d.get("meta_count"))
         c2.metric("MIS 有效解析", d.get("mis_parse_ok"))
@@ -456,6 +471,6 @@ if scan:
                 </div>""", unsafe_allow_html=True)
     else: 
         if d.get("mis_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)，請確認執行環境。")
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)，請檢視底層監控面板。")
         else:
             st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
