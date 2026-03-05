@@ -16,40 +16,36 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 st.set_page_config(page_title="起漲戰情室", page_icon="🚀", layout="wide")
 
-CSS = """
 <style>
 :root{
-  --bg:#080808;             /* 純黑背景 */
-  --card:#1a1a1a;           /* 深灰卡片 */
-  --card2:#121212;          /* 次級深灰 */
-  --text:#ffffff;           /* 純白文字 */
-  --muted:#aaaaaa;          /* 靜音文字 */
-  
-  /* 霓虹藍冷色調點綴 */
-  --accent:#00c2ff;          /* 主點綴色 */
-  --accent2:#007bff;         /* 次點綴色 */
-  
-  --ok:#00c2ff;             /* 霓虹藍代替綠色 */
-  --warn:#f4b400;           /* 琥珀黃 */
-  --bad:#cf6679;            /* 啞光紅 */
-  --line:rgba(255,255,255,.03); /* 極淡的線條 */
+  --bg:#07080b;
+  --card:#0f1116;
+  --card2:#0b0d12;
+  --text:#e5e7eb;
+  --muted:#9ca3af;
+
+  /* 冷酷黑灰主調 */
+  --accent:#e5e7eb;   /* 用於標題文字亮灰 */
+  --accent2:#6b7280;  /* 深灰 */
+  --ok:#a3e635;
+  --warn:#cbd5e1;
+  --bad:#fb7185;
+
+  --line:rgba(148,163,184,.14);
 }
 
-/* 隱藏預設的主選單與 footer 使畫面更乾淨 */
-#MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-
+/* 全局背景 */
 .main { background: var(--bg); }
 .block-container { padding-top: 1.2rem; padding-bottom: 2.2rem; }
 
-/* 頂部 Header */
+/* Header */
 .header-wrap{
   display:flex; align-items:flex-end; justify-content:space-between;
   gap:18px; padding: 10px 4px 6px 4px;
 }
 .title{
   font-size: 44px; font-weight: 900; letter-spacing: .5px;
-  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  background: linear-gradient(90deg, #f3f4f6, #9ca3af);
   -webkit-background-clip:text; -webkit-text-fill-color: transparent;
   margin:0;
 }
@@ -57,17 +53,19 @@ footer {visibility: hidden;}
   margin:6px 0 0 2px; color: var(--muted); font-size: 14px;
 }
 
-/* 膠囊 */
+/* 右上角 pill */
 .pill{
   display:inline-flex; align-items:center; gap:8px;
   padding: 8px 12px; border:1px solid var(--line);
-  border-radius: 999px; color: var(--text); background: var(--card);
+  border-radius: 999px; color: var(--text);
+  background: rgba(15,17,22,.72);
   font-size: 13px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.25);
 }
 .pill b{ color: var(--text); }
-.pill .dot{ width:8px; height:8px; border-radius:999px; background: var(--warn); display:inline-block; }
+.pill .dot{ width:8px; height:8px; border-radius:999px; background:#9ca3af; display:inline-block; }
 
-/* 網格系統 */
+/* 卡片 grid */
 .grid{
   display:grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -75,21 +73,23 @@ footer {visibility: hidden;}
   margin: 14px 0 6px 0;
 }
 .card{
-  background: var(--card);
+  background: linear-gradient(180deg, rgba(15,17,22,.92), rgba(11,13,18,.92));
   border:1px solid var(--line);
   border-radius: 16px;
   padding: 14px 14px 12px 14px;
-  box-shadow: 0 4px 6px rgba(0,0,0,.2);
+  box-shadow: 0 16px 40px rgba(0,0,0,.35);
 }
 .k{ color: var(--muted); font-size: 12px; margin-bottom: 6px; }
 .v{ color: var(--text); font-size: 20px; font-weight: 800; }
 .v small{ color: var(--muted); font-weight: 600; font-size: 12px; margin-left: 6px;}
+
+/* 分隔線 */
 .hr{ height:1px; background: var(--line); margin: 12px 0; }
 
-/* 提示 banner */
+/* 橫幅提示 */
 .banner{
-  background: rgba(244, 180, 0, .05); /* 琥珀黃低透明度 */
-  border: 1px solid rgba(244, 180, 0, .15);
+  background: rgba(148,163,184,.08);
+  border: 1px solid rgba(148,163,184,.22);
   color: var(--text);
   border-radius: 16px;
   padding: 12px 14px;
@@ -97,7 +97,7 @@ footer {visibility: hidden;}
 }
 .banner b{ color: #fff; }
 
-/* 戰情卡片內部的 Metric */
+/* TOP 卡片資訊 */
 .metric{
   display:flex; justify-content:space-between; align-items:flex-end;
   gap:10px;
@@ -108,29 +108,44 @@ footer {visibility: hidden;}
 .metric .tag{
   font-size: 12px; padding: 4px 8px; border-radius: 999px;
   border:1px solid var(--line); color: var(--text);
-  background: rgba(255,255,255,.05);
+  background: rgba(15,17,22,.7);
 }
 .metric .price{ font-size: 22px; font-weight: 900; color: var(--text); line-height: 1; }
 .metric .chg{ font-size: 12px; color: var(--muted); }
 
-/* Streamlit 預設元件美化 */
+/* 按鈕：冷酷黑灰 */
 .stButton>button{
   border-radius: 14px !important;
-  border: 1px solid rgba(0,194,255,.3) !important;
-  background: linear-gradient(90deg, rgba(0,194,255,.15), rgba(0,123,255,.08)) !important;
+  border: 1px solid rgba(203,213,225,.28) !important;
+  background: linear-gradient(90deg, rgba(148,163,184,.18), rgba(107,114,128,.12)) !important;
   color: var(--text) !important;
   font-weight: 800 !important;
   padding: 10px 14px !important;
-  transition: all .2s;
 }
 .stButton>button:hover{
-  border-color: rgba(0,194,255,.6) !important;
-  box-shadow: 0 0 10px rgba(0,194,255,.2);
+  border: 1px solid rgba(203,213,225,.45) !important;
+  background: linear-gradient(90deg, rgba(148,163,184,.24), rgba(107,114,128,.16)) !important;
 }
-.stSelectbox>div>div{
+
+/* 下拉與輸入框更貼黑灰 */
+.stSelectbox>div>div,
+.stTextInput>div>div,
+.stNumberInput>div>div{
   border-radius: 14px !important;
+  border: 1px solid rgba(148,163,184,.20) !important;
+  background: rgba(15,17,22,.72) !important;
+  color: var(--text) !important;
 }
+
+/* 小字 */
 .small-note{ color: var(--muted); font-size: 12px; }
+
+/* 表格（dataframe）背景更黑 */
+[data-testid="stDataFrame"]{
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -419,3 +434,4 @@ if run_scan:
             st.dataframe(result.style.format({
                 "現價":"{:.2f}","較昨收(%)":"{:.2f}","累積量(張)":"{:,.0f}","盤中爆量倍數":"{:.2f}","前20日高":"{:.2f}","突破門檻":"{:.2f}","綜合分數":"{:.2f}"
             }).background_gradient(subset=['較昨收(%)','綜合分數'], cmap='Blues'), use_container_width=True, height=520)
+
