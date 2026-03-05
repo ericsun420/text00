@@ -1,4 +1,4 @@
-# app.py — 起漲先機通吃版 (1~3根)｜完美支援盤後複盤｜嚴格剔除權證
+# app.py — 起漲先機 (1~3根)｜MIS 盤中極速入口｜精準 Tick 連板計算
 import io
 import math
 import time
@@ -21,30 +21,21 @@ st.set_page_config(page_title="起漲戰情室｜極簡暴力", page_icon="⚡",
 
 CSS = """
 <style>
-:root{
-  --bg:#07080b; --card:#0f1116; --text:#e5e7eb; --muted:#9ca3af;
-  --line:rgba(148,163,184,.16); --shadow: 0 16px 40px rgba(0,0,0,.35);
-  --ok:#a3e635; --warn:#fbbf24; --bad:#fb7185;
-}
+:root{ --bg:#07080b; --card:#0f1116; --text:#e5e7eb; --muted:#9ca3af; --line:rgba(148,163,184,.16); --shadow: 0 16px 40px rgba(0,0,0,.35); }
 [data-testid="stAppViewContainer"], .main{ background: var(--bg) !important; color: var(--text) !important; }
 .block-container{ padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px; }
 [data-testid="stSidebar"] { display: none !important; }
 [data-testid="stHeader"]{ background: transparent !important; }
-
 .title{ font-size: 46px; font-weight: 900; background: linear-gradient(90deg, #f3f4f6, #9ca3af); -webkit-background-clip:text; -webkit-text-fill-color: transparent; margin:0; text-align: center; }
 .subtitle{ color: var(--muted); font-size: 15px; text-align: center; margin-bottom: 30px; letter-spacing: 1px; }
-
 .card{ background: linear-gradient(180deg, rgba(15,17,22,.94), rgba(11,13,18,.94)); border:1px solid var(--line); border-radius: 16px; padding: 18px; box-shadow: var(--shadow); margin-bottom: 12px; }
 .metric{ display:flex; justify-content:space-between; align-items:flex-end; border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px;}
 .metric .code{ color: var(--text); font-size: 20px; font-weight: 900; }
 .metric .name{ color: var(--muted); font-size: 14px; margin-left: 8px;}
 .metric .price{ font-size: 26px; font-weight: 900; color: var(--text); }
-
-/* 階段標籤設計 */
 .tag-stage1{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid #3b82f6; background: rgba(59,130,246,0.2); color: #93c5fd; font-weight: bold;}
 .tag-stage2{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid #f97316; background: rgba(249,115,22,0.2); color: #fdba74; font-weight: bold;}
 .tag-stage3{ font-size: 12px; padding: 4px 8px; border-radius: 999px; border:1px solid #ef4444; background: rgba(239,68,68,0.2); color: #fca5a5; font-weight: bold;}
-
 .stButton>button{ border-radius: 16px !important; border: 1px solid rgba(255,255,255,0.2) !important; background: linear-gradient(90deg, #1f2937, #111827) !important; color: white !important; font-weight: 900 !important; font-size: 20px !important; padding: 25px !important; transition: all 0.3s ease; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
 .stButton>button:hover{ border-color: #f87171 !important; transform: translateY(-2px); box-shadow: 0 6px 20px rgba(248,113,113,0.2); }
 </style>
@@ -52,9 +43,8 @@ CSS = """
 st.markdown(CSS, unsafe_allow_html=True)
 
 # =========================
-# TIME & MATH HELPERS
+# MATH & TICK HELPERS (精準 Tick 漲停計算)
 # =========================
-TZ_NAME = "Asia/Taipei"
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 def minutes_elapsed_in_session(ts):
     start, end = datetime.combine(ts.date(), dtime(9, 0)), datetime.combine(ts.date(), dtime(13, 30))
@@ -63,12 +53,21 @@ def minutes_elapsed_in_session(ts):
     return int((ts - start).total_seconds() // 60)
 
 def tw_tick(price):
-    return 0.01 if price<10 else 0.05 if price<50 else 0.1 if price<100 else 0.5 if price<500 else 1.0 if price<1000 else 5.0
+    if price < 10: return 0.01
+    if price < 50: return 0.05
+    if price < 100: return 0.10
+    if price < 500: return 0.50
+    if price < 1000: return 1.00
+    return 5.00
 
 def calc_limit_up(prev_close, limit_pct):
     raw = prev_close * (1.0 + limit_pct)
     tick = tw_tick(raw)
     return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
+
+def split_nums(s):
+    if not s or s == "-": return []
+    return [float(x) for x in str(s).split("_") if x and x != "-"]
 
 # =========================
 # ENGINE 1: 股票清單 (嚴格剔除權證)
@@ -76,23 +75,6 @@ def calc_limit_up(prev_close, limit_pct):
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def get_stock_list():
     meta = {}
-    try:
-        r1 = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=5, verify=False)
-        for item in r1.json():
-            c = str(item.get("公司代號", "")).strip()
-            # 【致命修正】嚴格要求 4 碼純數字！
-            if len(c) == 4 and c.isdigit(): 
-                meta[c] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "tse"}
-                
-        r2 = requests.get("https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O", timeout=5, verify=False)
-        for item in r2.json():
-            c = str(item.get("公司代號", "")).strip()
-            if len(c) == 4 and c.isdigit(): 
-                meta[c] = {"name": item["公司簡稱"], "ind": item.get("產業別", ""), "ex": "otc"}
-                
-        if len(meta) > 500: return meta
-    except: pass
-
     urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
             ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
@@ -101,164 +83,160 @@ def get_stock_list():
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), on_bad_lines="skip")
             for _, row in df.iterrows():
                 c = str(row.iloc[1] if len(row)>1 else "").strip()
+                # 嚴格 4 碼
                 if len(c) == 4 and c.isdigit(): 
                     meta[c] = {"name": str(row.iloc[2]), "ind": str(row.iloc[6]) if len(row)>6 else "", "ex": ex}
         except: pass
-        
-    if not meta: raise ValueError("完全無法連線取得股票清單，請確認網路或稍後再試。")
+    if not meta: raise ValueError("無法取得股票清單，請確認網路連線。")
     return meta
 
 # =========================
-# ENGINE 2: 全市場 Yahoo 歷史與即時快篩
+# ENGINE 2: MIS 盤中極速快篩 (真正的即時入口)
 # =========================
-def fast_yahoo_scan(meta_dict, status_placeholder):
-    sym_to_code = {f"{c}.{'TW' if v['ex']=='tse' else 'TWO'}": c for c, v in meta_dict.items()}
-    syms = list(sym_to_code.keys())
-    
+def fast_mis_scan(meta_dict, status_placeholder):
+    s = requests.Session()
+    s.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers={"User-Agent": "Mozilla/5.0"}, timeout=5, verify=False)
+    codes = list(meta_dict.keys())
     rows = []
-    batch_size = 200 
-    total_batches = math.ceil(len(syms) / batch_size)
     
-    for i in range(0, len(syms), batch_size):
-        chunk = syms[i:i+batch_size]
-        batch_num = (i // batch_size) + 1
-        status_placeholder.update(label=f"📡 全市場快篩中：正在下載第 {batch_num} / {total_batches} 批次 ({len(syms)}檔)...", state="running")
+    total_batches = math.ceil(len(codes) / 120)
+    for i in range(0, len(codes), 120):
+        chunk = codes[i:i+120]
+        ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
+        url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
+        status_placeholder.update(label=f"📡 盤中即時快篩：MIS 連線中 ({i//120 + 1}/{total_batches})...", state="running")
         
         try:
-            raw = yf.download(tickers=" ".join(chunk), period="5d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
-            for sym in chunk:
-                try:
-                    df = raw[sym].dropna() if isinstance(raw.columns, pd.MultiIndex) else raw.dropna()
-                    if len(df) < 2: continue
-                    
-                    last = float(df["Close"].iloc[-1])
-                    prev_close = float(df["Close"].iloc[-2])
-                    vol_lots = int(float(df["Volume"].iloc[-1]) / 1000)
-                    
-                    # 盤中量 > 800張，且距離漲停 < 3.0%
-                    limit_up = calc_limit_up(prev_close, 0.10)
-                    dist = ((limit_up - last) / limit_up) * 100
-                    
-                    if vol_lots >= 800 and dist <= 3.0:
-                        rows.append({
-                            "code": sym_to_code[sym], "last": last, "upper": limit_up, 
-                            "dist": dist, "vol_lots": vol_lots, "prev_close": prev_close
-                        })
-                except: continue
-        except Exception:
-            time.sleep(0.1)
-            continue
-            
+            r = s.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5, verify=False)
+            for q in r.json().get("msgArray", []):
+                z, u, v = q.get("z"), q.get("u"), q.get("v")
+                if z == "-" or not z or u == "-" or not u: continue
+                
+                last, upper, vol_lots = float(z), float(u), int(float(v or 0))
+                
+                # 【盤中真實快篩】：距離 MIS 漲停價 <= 3%，且累積量 >= 800 張
+                dist_pct = ((upper - last) / upper) * 100
+                if vol_lots >= 800 and dist_pct <= 3.0:
+                    b_prices = split_nums(q.get("b"))
+                    b_vols = split_nums(q.get("g"))
+                    rows.append({
+                        "code": q.get("c"), "last": last, "upper": upper, "dist": dist_pct, 
+                        "vol_lots": vol_lots, "prev_close": float(q.get("y") if q.get("y")!="-" else 0),
+                        "high": float(q.get("h") if q.get("h")!="-" else last),
+                        "low": float(q.get("l") if q.get("l")!="-" else last),
+                        "bid_p1": b_prices[0] if b_prices else 0,
+                        "bid_v1": b_vols[0] if b_vols else 0
+                    })
+        except: time.sleep(0.05)
+        
     return pd.DataFrame(rows)
 
 # =========================
-# ENGINE 3: 日線與 5分K 深度濾網 (支援 1~3 根起漲)
+# ENGINE 3: 日線排雷與連板計算 (精準 Tick 判斷)
 # =========================
 def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if candidates_df.empty: return pd.DataFrame()
+    
+    # 轉換成 YFinance 格式
     syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
-    results = []
-    frac = max(0.2, min(1.0, minutes_elapsed_in_session(now_ts) / 270.0))
-
-    status_placeholder.update(label=f"📊 鎖定 {len(syms)} 檔候選，套用主力籌碼與階梯濾網...", state="running")
+    status_placeholder.update(label=f"📊 鎖定 {len(syms)} 檔候選，進行日線排雷與連板數計算...", state="running")
     
     try:
-        raw_daily = yf.download(tickers=" ".join(syms), period="200d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
-        raw_5m = yf.download(tickers=" ".join(syms), period="1d", interval="5m", group_by="ticker", auto_adjust=False, threads=False, progress=False)
-    except:
-        return pd.DataFrame()
+        raw_daily = yf.download(tickers=" ".join(syms), period="100d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
+    except: return pd.DataFrame()
+
+    results = []
+    # 盤中時間進度 (用來算爆量倍數)
+    frac = max(0.2, min(1.0, minutes_elapsed_in_session(now_ts) / 270.0))
+    today_date = now_ts.date()
 
     for _, r in candidates_df.iterrows():
         c = r["code"]
         sym = f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}"
+        
         try:
             dfD = raw_daily[sym].dropna() if isinstance(raw_daily.columns, pd.MultiIndex) else raw_daily.dropna()
-            df5 = raw_5m[sym].dropna() if isinstance(raw_5m.columns, pd.MultiIndex) else raw_5m.dropna()
-            if len(dfD) < 60: continue
+            if len(dfD) < 30: continue
 
-            closeD, highD, lowD, volD = dfD["Close"].astype(float), dfD["High"].astype(float), dfD["Low"].astype(float), dfD["Volume"].astype(float)
+            # 1. 判斷 10% 還是 20% (用歷史最大漲幅推斷)
+            hist_ret = dfD["Close"].pct_change().dropna()
+            limit_pct = 0.20 if (len(hist_ret)>10 and float(hist_ret.max()) > 0.105) else 0.10
+
+            # 2. 【核心修復】正確剔除今天，算過去連板數 (Tick 判斷法)
+            has_today = dfD.index[-1].date() == today_date
+            past_df = dfD.iloc[:-1].copy() if has_today else dfD.copy()
             
-            hist_ret = closeD.pct_change().dropna()
-            limit_pct = 0.20 if (len(hist_ret)>10 and float(hist_ret.tail(150).max()) > 0.105) else 0.10
-            limit_thr = 0.19 if limit_pct == 0.20 else 0.095
+            past_boards = 0
+            if len(past_df) >= 10:
+                past_10 = past_df.tail(10)
+                # 倒著往前數，只要前一天收盤價摸到漲停就 +1，沒摸到就中斷
+                for i in range(len(past_10)-1, 0, -1):
+                    curr_c = float(past_10["Close"].iloc[i])
+                    prev_c = float(past_10["Close"].iloc[i-1])
+                    lim_u = calc_limit_up(prev_c, limit_pct)
+                    
+                    if curr_c >= (lim_u - tw_tick(lim_u)): 
+                        past_boards += 1
+                    else:
+                        break # 中斷連板
             
-            # 【起漲先機升級】：計算「過去10天(不含今天)」有幾根漲停
-            past_returns = hist_ret.iloc[:-1] if not df5.empty else hist_ret
-            past_boards = int((past_returns.tail(10) >= limit_thr).sum())
-            
-            # 如果已經有 3 根以上的漲停，直接淘汰 (拒吃魚尾)
+            # 如果已經 >= 3 根，直接淘汰
             if past_boards >= 3: continue
             
-            # 給予階段標籤
-            if past_boards == 0:
-                stage_label = "🚀 第一根"
-                stage_class = "tag-stage1"
-                stage_bonus = 10.0
-            elif past_boards == 1:
-                stage_label = "🔥 第二根"
-                stage_class = "tag-stage2"
-                stage_bonus = 5.0 
-            else:
-                stage_label = "⚠️ 第三根"
-                stage_class = "tag-stage3"
-                stage_bonus = -5.0
+            # 標籤
+            stage_bonus = 0.0
+            if past_boards == 0: stage_label, stage_class, stage_bonus = "🚀 第一根", "tag-stage1", 10.0
+            elif past_boards == 1: stage_label, stage_class, stage_bonus = "🔥 第二根", "tag-stage2", 5.0
+            else: stage_label, stage_class, stage_bonus = "⚠️ 第三根", "tag-stage3", -5.0
 
-            # 【基底計算】
+            # 3. 排雷：基底與乖離率計算
+            vol_ma20 = float(dfD["Volume"].rolling(20).mean().iloc[-1])
             yday_close = float(r["prev_close"])
-            ma20 = closeD.rolling(20).mean()
-            base_len = int(((closeD / (ma20 + 1e-9) - 1.0).abs() <= 0.04).tail(60).sum())
-            tr = pd.concat([(highD - lowD).abs(), (highD - closeD.shift(1)).abs(), (lowD - closeD.shift(1)).abs()], axis=1).max(axis=1)
+            high60_ex1 = float(past_df["High"].rolling(60).max().iloc[-1]) if len(past_df)>=60 else yday_close
+            
+            ma20 = past_df["Close"].rolling(20).mean()
+            base_len = int(((past_df["Close"] / (ma20 + 1e-9) - 1.0).abs() <= 0.04).tail(60).sum())
+            
+            range20_pct = float((past_df["High"].rolling(20).max().iloc[-1] - past_df["Low"].rolling(20).min().iloc[-1]) / yday_close)
+            range60_pct = float((past_df["High"].rolling(60).max().iloc[-1] - past_df["Low"].rolling(60).min().iloc[-1]) / yday_close)
+            
+            tr = pd.concat([(past_df["High"] - past_df["Low"]).abs(), (past_df["High"] - past_df["Close"].shift(1)).abs(), (past_df["Low"] - past_df["Close"].shift(1)).abs()], axis=1).max(axis=1)
             atr20_pct = float(tr.rolling(20).mean().iloc[-1] / yday_close) * 100
-            range20_pct = float((highD.rolling(20).max().iloc[-1] - lowD.rolling(20).min().iloc[-1]) / yday_close)
-            range60_pct = float((highD.rolling(60).max().iloc[-1] - lowD.rolling(60).min().iloc[-1]) / yday_close)
             base_tight = float((1.0 - min(1.0, range20_pct / (range60_pct + 1e-9))) * 0.6 + (1.0 - min(1.0, atr20_pct / 8.0)) * 0.4)
 
-            # --- 5分K 特徵 ---
-            if not df5.empty:
-                day_high, day_low = float(df5["High"].max()), float(df5["Low"].min())
-            else:
-                day_high, day_low = float(highD.iloc[-1]), float(lowD.iloc[-1])
-                
-            tick = tw_tick(r["upper"])
+            # 4. 【核心修復】MIS 盤中數據即時計算 (取代容易掛掉的 5m)
+            rng = max(1e-9, r["high"] - r["low"])
+            close_pos = (r["last"] - r["low"]) / rng
+            pullback = (r["high"] - r["last"]) / max(1e-9, r["high"])
             
-            # 【鎖死品質與回落】
-            rng = max(1e-9, day_high - day_low)
-            close_pos = (r["last"] - day_low) / rng
-            pullback = (day_high - r["last"]) / max(1e-9, day_high)
-            if pullback > 0.0040: continue
+            # 回落超過 0.38% 淘汰
+            if pullback > 0.0038: continue 
 
-            # 【開板次數近似】
-            open_board = 0
-            if not df5.empty:
-                high5, close5 = df5["High"].astype(float).values, df5["Close"].astype(float).values
-                touch = high5 >= (r["upper"] - tick)
-                if touch.any():
-                    in_limit = True
-                    for i in range(int(touch.argmax()) + 1, len(close5)):
-                        if in_limit and close5[i] < (r["upper"] - 2.0 * tick): open_board += 1; in_limit = False
-                        elif not in_limit and high5[i] >= (r["upper"] - tick): in_limit = True
+            # 【核心修復】爆量倍數 (用 MIS 累積量 / 日均量 * 盤中比例)
+            vol_lots_daily_avg = vol_ma20 / 1000
+            vol_ratio = r["vol_lots"] / (vol_lots_daily_avg * frac + 1e-9)
+            if vol_ratio < 1.3: continue # 量縮淘汰
 
-            # 【爆量倍數】
-            vol_ma20 = float(volD.rolling(20).mean().iloc[-1])
-            vol_ratio = (r["vol_lots"] * 1000) / (vol_ma20 * frac + 1e-9)
-            if vol_ratio < 1.3: continue
+            # MIS 鎖死品質判定：買一價 == 漲停價，且掛單量大
+            is_locked = (r["bid_p1"] >= r["upper"] - tw_tick(r["upper"]))
+            lock_bonus = 15.0 if is_locked else 0.0
 
-            # --- 綜合潛力計分 (0~100) ---
-            score = 50.0 
-            score += stage_bonus
+            # 5. 綜合潛力計分 (0~100)
+            score = 40.0 + stage_bonus + lock_bonus
             score += 15.0 * min(1.0, max(0.0, (close_pos - 0.85) / 0.15))
-            score += 15.0 * min(1.0, max(0.0, (0.0038 - pullback) / 0.0038))
+            score += 10.0 * min(1.0, max(0.0, (0.0038 - pullback) / 0.0038))
             score += 15.0 * min(1.0, max(0.0, (vol_ratio - 1.5) / 2.5))
             score += 10.0 * min(1.0, max(0.0, (base_len - 8) / 40.0))
             score += 5.0 * min(1.0, max(0.0, base_tight))
-            score -= min(10.0, float(open_board) * 3.0)
+            if r["upper"] >= high60_ex1 * 0.995: score += 5.0 # 突破60日高
 
             results.append({
                 "代號": c, "名稱": meta_dict[c]["name"], "族群": meta_dict[c]["ind"],
                 "現價": r["last"], "漲停價": r["upper"], "距離漲停(%)": r["dist"],
-                "較昨收(%)": (r["last"] / yday_close - 1.0)*100, "累積量(張)": r["vol_lots"],
-                "盤中爆量倍數": vol_ratio, "開板次數": open_board, "基底天數": base_len,
-                "潛力分": max(0.0, min(100.0, score)),
+                "較昨收(%)": ((r["last"] / yday_close) - 1.0) * 100, 
+                "累積量(張)": r["vol_lots"], "盤中爆量倍數": vol_ratio, 
+                "鎖死狀態": "鎖死" if is_locked else "未鎖", "買一掛單": r["bid_v1"],
+                "基底天數": base_len, "潛力分": max(0.0, min(100.0, score)),
                 "階段標籤": stage_label, "階段Class": stage_class
             })
         except: continue
@@ -266,6 +244,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if not results: return pd.DataFrame()
     out = pd.DataFrame(results)
     
+    # 族群共振加分
     grp = out["族群"].value_counts()
     out["潛力分"] += out["族群"].apply(lambda x: min(15.0, max(0.0, (int(grp.get(x, 1)) - 1) * 5.0)) if x and x != "未分類" else 0.0)
     out["潛力分"] = out["潛力分"].clip(0, 100)
@@ -275,40 +254,38 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     return out
 
 # =========================
-# MAIN APP (無腦一鍵啟動)
+# MAIN APP (極簡暴力)
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">極簡暴力版 ｜ 智慧追蹤第 1~3 根起漲點，盤中盤後皆可秒開</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">MIS 光速盤中版 ｜ 精準 Tick 連板運算，絕不漏接</div>', unsafe_allow_html=True)
 
 run_scan = st.button("🚀 啟動掃描 (自動鎖定起漲先機)", use_container_width=True)
 
 if run_scan:
-    # 只要程式有重編譯過，快取就會刷新，這次保證只有 ~9 批次！
-    with st.status("⚡ 系統極速運算中，請稍候...", expanded=True) as status:
+    with st.status("⚡ 戰情室運算中，請稍候...", expanded=True) as status:
         
-        status.update(label="📦 1/3 載入台股最新清單 (已剔除四萬檔權證)...", state="running")
+        status.update(label="📦 1/3 載入台股最新清單...", state="running")
         try:
             meta = get_stock_list()
         except Exception as e:
-            status.update(label="❌ 清單載入失敗", state="error")
-            st.error(str(e)); st.stop()
+            status.update(label="❌ 清單載入失敗", state="error"); st.error(str(e)); st.stop()
             
-        pre_df = fast_yahoo_scan(meta, status)
+        # 使用 MIS 作為第一道入口，速度快且符合「盤中」定義
+        pre_df = fast_mis_scan(meta, status)
         
         if pre_df.empty:
             status.update(label="✅ 掃描完畢", state="complete")
-            st.info("😴 目前全市場沒有符合「爆量且接近漲停」的標的。")
+            st.info("😴 目前盤面上沒有符合「爆量且接近漲停」的標的。")
             st.stop()
             
         final_res = core_filter_engine(pre_df, meta, now_taipei(), status)
-        
         status.update(label="✅ 掃描與計算完成！", state="complete")
 
     # =========================
     # 渲染結果
     # =========================
     if final_res.empty:
-        st.warning("⚠️ 有股票接近漲停，但都被『排雷濾網』排除了 (可能是已漲超過 3 根、回落太大或爆量不足)。")
+        st.warning("⚠️ 有股票接近漲停，但都被『排雷濾網』排除了 (可能是已漲超過 3 根、回落太大或量不夠)。")
     else:
         st.success(f"🎯 完美鎖定！為您篩選出 {len(final_res)} 檔『起漲黃金期』候選標的。")
         
@@ -325,12 +302,12 @@ if run_scan:
                         <div class="price">{r['現價']:.2f}</div>
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af;">
-                        <span>距漲停: <b style="color:#e5e7eb;">{r['距離漲停(%)']:.2f}%</b></span>
+                        <span>狀態: <b style="color:{'#a3e635' if r['鎖死狀態']=='鎖死' else '#fbbf24'};">{r['鎖死狀態']}</b></span>
                         <span>爆量: <b style="color:#f87171;">{r['盤中爆量倍數']:.1f}x</b></span>
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af; margin-top:6px;">
                         <span>潛力分: <b style="color:#a3e635;">{r['潛力分']:.1f}</b></span>
-                        <span>開板: <b>{r['開板次數']}</b></span>
+                        <span>買一掛單: <b>{int(r['買一掛單'])}</b></span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
