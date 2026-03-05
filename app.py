@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神修正版｜1~N 根連板通吃｜精準漲停判斷
+# app.py — 起漲戰情室｜戰神修正版 2.0｜1~N 根連板通吃｜精準漲停判斷
 import io
 import math
 import time
@@ -17,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="起漲戰情室｜戰神修正版", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室｜戰神修正版 2.0", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
@@ -47,11 +47,9 @@ st.markdown(CSS, unsafe_allow_html=True)
 # MATH & TICK HELPERS
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
-
-# 【核心修正 3】: 安全時間比例，防止負值
 def get_vol_frac(ts):
     m = int((datetime.combine(ts.date(), ts.time()) - datetime.combine(ts.date(), dtime(9, 0))).total_seconds() // 60)
-    m = max(0, min(270, m)) # 守衛條件
+    m = max(0, min(270, m)) 
     if m <= 30: return 0.12
     elif m <= 120: return 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0)
     else: return min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0))
@@ -69,6 +67,7 @@ def calc_limit_up(prev_close, limit_pct=0.10):
     tick = tw_tick(raw)
     return round(round(raw / tick) * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
+# 【核心修正 2】: 安全數字切割
 def split_nums(s):
     out = []
     for x in str(s or "").split("_"):
@@ -100,7 +99,10 @@ def get_stock_list():
                 if len(code) == 4 and code.isdigit():
                     stype = str(row[t_col])
                     if "權證" in stype or "ETF" in stype: continue
-                    meta[code] = {"name": str(row[n_col]), "ind": str(row[g_col]) if len(row)>6 else "未分類", "ex": ex}
+                    # 【核心修正 1】: 更強健的族群名稱抓取
+                    ind = str(row.get(g_col, "")).strip()
+                    if not ind or ind.lower() == "nan": ind = "未分類"
+                    meta[code] = {"name": str(row[n_col]), "ind": ind, "ex": ex}
         except: pass
     if not meta: raise ValueError("清單載入失敗。")
     return meta
@@ -115,7 +117,7 @@ def fast_mis_scan(meta_dict, status_placeholder):
     
     codes = list(meta_dict.keys())
     rows = []
-    batch_size = 80 # 【核心修正 2】: Batch 縮減至 80
+    batch_size = 80 
     total_batches = math.ceil(len(codes) / batch_size)
     
     for i in range(0, len(codes), batch_size):
@@ -131,7 +133,8 @@ def fast_mis_scan(meta_dict, status_placeholder):
                 c = q.get("c")
                 if not c or c not in meta_dict: continue
                 z, u, v, y = q.get("z"), q.get("u"), q.get("v"), q.get("y")
-                if not z or z == "-" or not u or u == "-" or not y or y == "-" or float(y) == 0: continue
+                # 【核心修正 2】: 排除 upper 為 0 或無效的標的
+                if not z or z == "-" or not u or u == "-" or not y or y == "-" or float(y) == 0 or float(u) <= 0: continue
                 
                 last, upper, prev_close = float(z), float(u), float(y)
                 vol_lots = int(float(v or 0) / 1000)
@@ -152,14 +155,17 @@ def fast_mis_scan(meta_dict, status_placeholder):
     return pd.DataFrame(rows)
 
 # =========================
-# ENGINE 3: 核心濾網 (漲停價逼近法)
+# ENGINE 3: 核心濾網 (精準判斷)
 # =========================
 def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
     if candidates_df.empty: return pd.DataFrame()
     
+    # 【核心修正 7】: 僅取前 80 檔送 Yahoo，防止超時
+    candidates_df = candidates_df.sort_values(["dist", "vol_lots"], ascending=[True, False]).head(80)
+    
     stats = {"Total": len(candidates_df), "YF_Fail": 0, "Hype": 0, "Pullback": 0, "VolRatio": 0, "LockFail": 0, "Err": 0}
     syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
-    status_placeholder.update(label=f"📊 正在運算 {len(syms)} 檔候選股...", state="running")
+    status_placeholder.update(label=f"📊 正在深度運算 {len(syms)} 檔候選股...", state="running")
     
     try:
         raw_daily = yf.download(tickers=" ".join(syms), period="100d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
@@ -177,45 +183,51 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             if len(dfD) < 30: 
                 stats["YF_Fail"] += 1; continue
 
-            hist_ret = dfD["Close"].pct_change().dropna()
             has_today = dfD.index[-1].date() == today_date
             past_df = dfD.iloc[:-1].copy() if has_today else dfD.copy()
             
-            # 【核心修正 4】: 漲停價逼近法 (制度推斷)
-            curr_limit_pct = 0.20 if (r["upper"] / r["prev_close"] > 1.11) else 0.10
-            
+            # 【核心修正 4 & 6】: 改良連板與制度推斷 (逼近法)
             past_boards = 0
             if len(past_df) >= 10:
                 past_10 = past_df.tail(10)
                 for i in range(len(past_10)-1, 0, -1):
-                    c_p, p_p = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
-                    # 判斷哪個漲停價更接近當天最高/收盤
-                    lim10 = calc_limit_up(p_p, 0.10)
-                    lim20 = calc_limit_up(p_p, 0.20)
-                    use20 = abs(c_p - lim20) < abs(c_p - lim10) or abs(float(past_10["High"].iloc[i]) - lim20) < abs(float(past_10["High"].iloc[i]) - lim10)
-                    daily_lim = lim20 if use20 else lim10
-                    if c_p >= (daily_lim - tw_tick(daily_lim)): past_boards += 1
+                    cp, pp, hp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1]), float(past_10["High"].iloc[i])
+                    l10, l20 = calc_limit_up(pp, 0.10), calc_limit_up(pp, 0.20)
+                    # 判斷制度：哪個漲停價更接近當天收盤或最高價，且必須在 2 Tick 內
+                    use20 = (abs(cp - l20) < abs(cp - l10) or abs(hp - l20) < abs(hp - l10)) and (min(abs(cp - l20), abs(hp - l20)) <= 2 * tw_tick(l20))
+                    daily_lim = l20 if use20 else l10
+                    if cp >= (daily_lim - tw_tick(daily_lim)): past_boards += 1
                     else: break
             
-            # 標籤更名
+            # 標籤
             if past_boards == 0: stage_label, stage_class, stage_bonus = "🚀 第一根", "tag-stage1", 10.0
             elif past_boards == 1: stage_label, stage_class, stage_bonus = "🔥 第二連", "tag-stage2", 5.0
             elif past_boards == 2: stage_label, stage_class, stage_bonus = "⚠️ 第三連", "tag-stage3", -5.0
             else: stage_label, stage_class, stage_bonus = f"💀 第{past_boards+1}連", "tag-stage4", -15.0
 
-            # 【核心修正 5】: 連板特權模式 (只有第一根才看 Hype)
-            max_ret_10d = float(hist_ret.tail(10).max()) * 100.0
+            # 【核心修正 5】: 修改 Hype 邏輯：近 10 日是否「漲停收盤」
             if past_boards == 0:
-                if max_ret_10d >= (19.5 if curr_limit_pct == 0.20 else 9.6):
+                had_limit_past = False
+                for j in range(len(past_df)-1, max(0, len(past_df)-10), -1):
+                    cp_j, pp_j = float(past_df["Close"].iloc[j]), float(past_df["Close"].iloc[j-1])
+                    l10_j, l20_j = calc_limit_up(pp_j, 0.10), calc_limit_up(pp_j, 0.20)
+                    lim_j = l20_j if (cp_j/pp_j > 1.11) else l10_j
+                    if cp_j >= (lim_j - tw_tick(lim_j)): 
+                        had_limit_past = True; break
+                if had_limit_past: 
                     stats["Hype"] += 1; continue
 
-            # 【核心修正 6】: 鎖死品質判定 (買一貼漲停 & 買一夠大 & 賣一也貼漲停)
+            # 【核心修正 3 & 4】: 精準鎖死品質 (考慮無賣盤情況)
             bid_lots1 = int(r["bid_v1"]/1000)
             ask_lots1 = int(r["ask_v1"]/1000)
+            has_ask = r["ask_p1"] > 0
+            
             is_locked = (r["bid_p1"] >= r["upper"] - tw_tick(r["upper"])) and (bid_lots1 >= 200)
-            ask_at_upper = (r["ask_p1"] >= r["upper"] - tw_tick(r["upper"]))
-            if is_locked and (not ask_at_upper): is_locked = False
-            if is_locked and ask_lots1 > 150: is_locked = False 
+            # 賣盤檢查：要嘛沒人賣，要嘛賣價貼在漲停且量不能大於買盤 60%
+            ask_at_upper = (not has_ask) or (r["ask_p1"] >= r["upper"] - tw_tick(r["upper"]))
+            if is_locked:
+                if not ask_at_upper: is_locked = False
+                elif ask_lots1 > max(150, bid_lots1 * 0.6): is_locked = False
             
             vol_ma20_lots = float(dfD["Volume"].rolling(20).mean().iloc[-1]) / 1000
             vol_ratio = r["vol_lots"] / (vol_ma20_lots * frac + 1e-9)
@@ -236,13 +248,12 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                 "代號": c, "名稱": meta_dict[c]["name"], "族群": meta_dict[c]["ind"],
                 "現價": r["last"], "距離(%)": r["dist"], "較昨收(%)": ((r["last"]/r["prev_close"])-1)*100, 
                 "累積量": r["vol_lots"], "爆量x": vol_ratio, "狀態": "鎖死" if is_locked else "未鎖", 
-                "買一": bid_lots1, "賣一": ask_lots1, "潛力分": max(0.0, min(100.0, score)),
+                "買一": bid_lots1, "賣一": ask_lots1, "連板序號": past_boards + 1, "潛力分": max(0.0, min(100.0, score)),
                 "階段": stage_label, "Class": stage_class
             })
         except: 
             stats["Err"] += 1
 
-    # 【核心修正 1】: 統計顯示在主畫面
     with st.expander("📊 掃描統計戰報 (淘汰原因追蹤)", expanded=False):
         st.json(stats)
     return pd.DataFrame(results).sort_values("潛力分", ascending=False).reset_index(drop=True) if results else pd.DataFrame()
@@ -251,12 +262,12 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
 # MAIN APP
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">戰神修正版 ｜ 精準漲停判斷 ｜ 1~N 根連板通吃</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">戰神修正版 2.0 ｜ 100% 實戰邏輯優化 ｜ 排除假鎖與無效權證</div>', unsafe_allow_html=True)
 
 run_scan = st.button("🚀 啟動掃描 (自動鎖定起漲先機)", use_container_width=True)
 
 if run_scan:
-    with st.status("⚡ 戰鬥中...", expanded=True) as status:
+    with st.status("⚡ 狙擊中...", expanded=True) as status:
         try:
             meta = get_stock_list()
             pre_df = fast_mis_scan(meta, status)
@@ -286,7 +297,7 @@ if run_scan:
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af; margin-top:6px;">
                         <span>潛力分: <b style="color:#a3e635;">{r['潛力分']:.1f}</b></span>
-                        <span>買一/賣一: <b>{r['買一']}/{r['賣一']}</b></span>
+                        <span>買/賣: <b>{r['買一']}/{r['賣一']}</b></span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
