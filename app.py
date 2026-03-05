@@ -1,14 +1,3 @@
-# app.py — 起漲戰情室（第一根漲停 + 連板潛力）＋🧭族群共振 Radar
-# ✅ 不走本機（不需要 twstock、也不需要本機檔案）
-# ✅ 股票清單：GitHub raw（避免 TWSE/MOPS 被擋）
-# ✅ 盤中：MIS 即時報價（避開 yfinance intraday 限流）
-# ✅ 日線：只抓少量候選（避免卡很久）
-#
-# 安裝：
-#   pip install -U streamlit pandas yfinance requests urllib3
-# 執行：
-#   streamlit run app.py
-
 import io
 import math
 import time
@@ -25,6 +14,7 @@ import yfinance as yf
 import streamlit as st
 import streamlit.components.v1 as components
 
+# 關閉 SSL 憑證警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
@@ -136,7 +126,8 @@ def _fetch_csv(url: str) -> pd.DataFrame:
     r = requests.get(url, timeout=45, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     text = r.text.replace("\r\n", "\n").replace("\r", "\n")
-    df = pd.read_csv(io.StringIO(text), dtype=str, engine="python", on_bad_lines="skip")
+    # 移除 on_bad_lines="skip"，確保相容性
+    df = pd.read_csv(io.StringIO(text), dtype=str, engine="python")
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
