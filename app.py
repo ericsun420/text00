@@ -3,10 +3,10 @@ import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta
 
-# --- 網頁基本設定 (開啟寬螢幕模式) ---
-st.set_page_config(page_title="每日飆股自動雷達", page_icon="🚀", layout="wide")
+# --- 網頁基本設定 ---
+st.set_page_config(page_title="每日飆股戰情室", page_icon="🚀", layout="wide")
 
-# --- 自訂 CSS 樣式 (注入美化靈魂) ---
+# --- 自訂 CSS 樣式 ---
 st.markdown("""
 <style>
     .main-title {
@@ -22,19 +22,34 @@ st.markdown("""
     .sub-title {
         text-align: center;
         color: #888888;
-        font-size: 18px;
-        margin-bottom: 40px;
-        letter-spacing: 2px;
+        font-size: 16px;
+        margin-bottom: 20px;
+        letter-spacing: 1px;
+    }
+    .golden-time-box {
+        background-color: #fff3e0;
+        border-left: 5px solid #ff9800;
+        padding: 15px 20px;
+        border-radius: 5px;
+        margin-bottom: 30px;
+        color: #333;
     }
     .stProgress > div > div > div > div {
-        background-color: #ff4b4b; /* 把進度條變成熱血的紅色 */
+        background-color: #ff4b4b;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 標題區 ---
+# --- 標題與提示區 ---
 st.markdown('<div class="main-title">🚀 每日飆股戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">全自動掃描 ｜ 爆量 2.5 倍 ｜ 突破 20 日高點 ｜ 第一根實體長紅</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-title">全自動掃描 ｜ 爆量 2.5 倍 ｜ 突破 20 日高點 ｜ 過濾避雷針 ｜ 流動性大於 2000 張</div>', unsafe_allow_html=True)
+
+st.markdown('''
+<div class="golden-time-box">
+    <b>💡 實戰黃金 10 分鐘提示：</b><br>
+    建議在每天 <b>13:15 ~ 13:25</b> 點開網頁自動掃描。此時今日 K 線長相已大致底定，若出現「👼 浪子回頭」標的，即可在 13:30 收盤前提前卡位，避免隔天開盤跳空買不到！
+</div>
+''', unsafe_allow_html=True)
 
 # --- 1. 內建台股精選高流動性名單 ---
 @st.cache_data 
@@ -59,11 +74,10 @@ def get_all_twse_stocks():
 
 stock_list = get_all_twse_stocks()
 
-# --- 2. 核心掃描邏輯 (加入「浪子回頭」分類器) ---
+# --- 2. 核心掃描邏輯 ---
 @st.cache_data(ttl=3600) 
 def scan_market(tickers):
     results = []
-    # 為了計算 60 日季線，我們抓資料的時間拉長到 120 天前
     start_date = datetime.today() - timedelta(days=120) 
     
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -77,29 +91,38 @@ def scan_market(tickers):
         
         try:
             df = yf.download(f"{ticker}.TW", start=start_date, progress=False)
-            if df.empty or len(df) < 65: continue # 確保資料夠算季線
+            if df.empty or len(df) < 65: continue 
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
                 
             df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
             df['Price_Max20'] = df['Close'].rolling(window=20).max()
-            df['MA20'] = df['Close'].rolling(window=20).mean() # 月線
-            df['MA60'] = df['Close'].rolling(window=60).mean() # 季線
+            df['MA20'] = df['Close'].rolling(window=20).mean() 
+            df['MA60'] = df['Close'].rolling(window=60).mean() 
             df['Daily_Return'] = df['Close'].pct_change()
             
             last_row = df.iloc[-1]
             prev_row = df.iloc[-2]
             
-            # 基本起漲條件
+            # --- 原始核心條件 ---
             cond_vol = last_row['Volume'] > (prev_row['Vol_MA20'] * 2.5)
             cond_price = last_row['Close'] >= prev_row['Price_Max20']
             cond_red_candle = last_row['Daily_Return'] > 0.04
-            
-            # 浪子考核標準：今天的收盤價，必須大於季線 (證明是真的轉強)
             cond_above_ma60 = last_row['Close'] > last_row['MA60'] 
             
-            if cond_vol and cond_price and cond_red_candle and cond_above_ma60:
+            # --- 新增防禦機制 1：流動性防禦 (大於 2000 張) ---
+            # yfinance 台股 Volume 單位是股數，2000 張 = 2,000,000 股
+            cond_min_vol = last_row['Volume'] >= 2_000_000 
+            
+            # --- 新增防禦機制 2：避雷針過濾 (上影線長度不得超過當天波動的 30%) ---
+            daily_range = last_row['High'] - last_row['Low']
+            upper_shadow = last_row['High'] - last_row['Close']
+            # 如果當天有波動，上影線比例必須小於等於 0.3；若當天一字漲停無波動 (daily_range=0)，則直接通過
+            cond_shadow = (upper_shadow <= daily_range * 0.3) if daily_range > 0 else True
+            
+            # 必須滿足所有條件才放行
+            if cond_vol and cond_price and cond_red_candle and cond_above_ma60 and cond_min_vol and cond_shadow:
                 
-                # 分類器：判斷是本來就很強，還是剛從底部翻起來
+                # 型態分類器
                 if last_row['MA20'] > last_row['MA60']:
                     pattern_tag = "🔥 多頭強勢"
                 else:
@@ -107,7 +130,7 @@ def scan_market(tickers):
                     
                 results.append({
                     "股票代號": ticker,
-                    "型態分類": pattern_tag,
+                    "型態": pattern_tag,
                     "最新收盤價": float(last_row['Close']),
                     "單日漲跌幅": float(last_row['Daily_Return']) * 100,
                     "今日成交量": int(last_row['Volume'] / 1000),
@@ -121,22 +144,20 @@ def scan_market(tickers):
     return pd.DataFrame(results)
 
 # --- 3. 執行與精美畫面渲染 ---
-with st.spinner(" "): # 隱藏預設 spinner，使用我們自訂的進度條
+with st.spinner(" "): 
     scan_results_df = scan_market(stock_list)
     
     if not scan_results_df.empty:
-        st.success(f"🎯 鎖定目標！今日共發現 **{len(scan_results_df)}** 檔符合起漲型態的潛力股。")
+        st.success(f"🎯 鎖定目標！今日共發現 **{len(scan_results_df)}** 檔符合高勝率起漲型態的潛力股。")
         st.divider()
         
-        # 建立美觀的卡片區塊 (每排顯示 3 到 4 張卡片)
         cols = st.columns(min(len(scan_results_df), 4))
         
         for index, row in scan_results_df.iterrows():
             col = cols[index % len(cols)]
             with col:
-                # 使用 st.metric 創造卡片感，delta_color="inverse" 會讓正數(上漲)顯示為紅色，符合台股習慣
                 st.metric(
-                    label=f"🔥 代號：{row['股票代號']}", 
+                    label=f"{row['型態']}：{row['股票代號']}", 
                     value=f"{row['最新收盤價']:.2f}", 
                     delta=f"漲幅 {row['單日漲跌幅']:.2f}%",
                     delta_color="inverse"
@@ -145,7 +166,6 @@ with st.spinner(" "): # 隱藏預設 spinner，使用我們自訂的進度條
         
         st.divider()
         
-        # 下方保留完整的原始數據表，並將數字格式化得更漂亮
         st.write("📋 完整數據報表：")
         st.dataframe(
             scan_results_df.style.format({
@@ -158,7 +178,7 @@ with st.spinner(" "): # 隱藏預設 spinner，使用我們自訂的進度條
         )
 
     else:
-        st.info("📉 今日市場資金動能較弱，沒有符合「爆量第一根」條件的標的，建議多看少做！")
+        st.info("📉 今日掃描完畢。市場資金動能較弱，或個股留有長上影線，建議多看少做！")
 
 # --- 4. 底部重整按鈕 ---
 st.markdown("<br><br>", unsafe_allow_html=True)
@@ -167,5 +187,3 @@ with col2:
     if st.button("🔄 重新掃描最新數據", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-
-
