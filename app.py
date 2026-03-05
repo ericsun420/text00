@@ -8,21 +8,29 @@ st.set_page_config(page_title="每日飆股自動掃描器", page_icon="🎯", l
 st.title("🎯 每日飆股自動掃描器")
 st.write("一鍵掃描全市場，找出今天符合「爆量2.5倍 + 突破20日高點 + 實體長紅」的潛力股！")
 
-# --- 1. 自動抓取全台股代碼的功能 ---
-@st.cache_data(ttl=86400) # 每天只去證交所抓一次資料就好，加快速度
+# --- 1. 自動抓取全台股代碼的功能 (改良版) ---
+@st.cache_data(ttl=86400) 
 def get_all_twse_stocks():
     try:
-        # 這是台灣證交所的公開資料 API，會回傳當日所有上市股票
+        # 加入 User-Agent 偽裝成一般瀏覽器，避免被證交所防火牆阻擋
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }
         url = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, headers=headers, timeout=10)
         data = res.json()
         
-        # 過濾出只有 4 碼的「普通股」（排除權證、特別股等）
         codes = [item['Code'] for item in data if len(item['Code']) == 4]
         return codes
     except Exception as e:
-        st.warning("目前無法連線至證交所抓取代碼，將使用預設名單。")
-        return ['2330', '2317', '2454', '2382', '2489', '2371']
+        st.warning("目前被證交所防火牆阻擋連線，已為您自動載入精選熱門股名單。")
+        # 準備一份夠長的備用清單（包含權值股、重電變壓器、AI 伺服器、航運等熱門股）
+        fallback_list = [
+            '2330', '2317', '2454', '2382', '2489', '2371', '3231', '3017', '2603', '2609',
+            '1519', '1514', '1503', '3450', '3443', '3037', '2368', '3008', '2301', '2308',
+            '2881', '2882', '2891', '2356', '2324', '3293', '2383', '3044', '2313', '2352'
+        ]
+        return fallback_list
 
 # --- 2. 畫面 UI：讓使用者選擇模式 ---
 scan_mode = st.radio(
@@ -104,3 +112,4 @@ if st.button("🚀 立即掃描今日飆股", type="primary"):
                 st.success(f"太棒了！為您抓出了 {len(scan_results_df)} 檔潛力股。")
             else:
                 st.info("今天市場比較平淡，沒有符合條件的標的喔！")
+
