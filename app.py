@@ -18,7 +18,7 @@ import streamlit.components.v1 as components
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
-# UI / THEME
+# UI / THEME (確保第一時間秒開渲染)
 # =========================
 st.set_page_config(page_title="起漲戰情室｜第一根漲停", page_icon="🧊", layout="wide")
 
@@ -64,7 +64,7 @@ CSS = """
 st.markdown(CSS, unsafe_allow_html=True)
 
 # =========================
-# TIME
+# TIME & HELPERS
 # =========================
 def now_taipei() -> datetime:
     return datetime.utcnow() + timedelta(hours=8)
@@ -80,9 +80,6 @@ def session_fraction(ts: datetime) -> float:
     m = minutes_elapsed_in_session(ts)
     return max(0.2, min(1.0, m / 270.0))
 
-# =========================
-# HELPERS
-# =========================
 def tw_tick(price: float) -> float:
     if price < 10: return 0.01
     if price < 50: return 0.05
@@ -106,8 +103,7 @@ def split_underscore_nums(s: str) -> List[float]:
     out = []
     for p in parts:
         v = fnum(p, None)
-        if v is not None:
-            out.append(v)
+        if v is not None: out.append(v)
     return out
 
 # =========================
@@ -123,10 +119,10 @@ class Meta:
     yf_symbol: str
 
 def _fetch_csv(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=45, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+    # 加入 verify=False 避免 SSL 憑證導致白畫面閃退，並設定 10 秒 Timeout
+    r = requests.get(url, timeout=10, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
     r.raise_for_status()
     text = r.text.replace("\r\n", "\n").replace("\r", "\n")
-    # 移除 on_bad_lines="skip"，確保相容性
     df = pd.read_csv(io.StringIO(text), dtype=str, engine="python")
     df.columns = [str(c).strip() for c in df.columns]
     return df
@@ -135,7 +131,6 @@ def _fetch_csv(url: str) -> pd.DataFrame:
 def load_universe_github(include_tpex: bool) -> Dict[str, Meta]:
     twse_raw = "https://raw.githubusercontent.com/mlouielu/twstock/refs/heads/master/twstock/codes/twse_equities.csv"
     tpex_raw = "https://raw.githubusercontent.com/mlouielu/twstock/refs/heads/master/twstock/codes/tpex_equities.csv"
-
     meta: Dict[str, Meta] = {}
 
     df1 = _fetch_csv(twse_raw)
@@ -145,15 +140,8 @@ def load_universe_github(include_tpex: bool) -> Dict[str, Meta]:
 
     for _, r in df1.iterrows():
         c = str(r.get("code","")).strip()
-        if re.match(r"^\d{4,6}$", c or ""):
-            meta[c] = Meta(
-                code=c,
-                name=str(r.get("name","")).strip(),
-                market="上市",
-                industry=str(r.get("group","")).strip() or "未分類",
-                ex="tse",
-                yf_symbol=f"{c}.TW",
-            )
+        if re.match(r"^\d{4,6}$", c):
+            meta[c] = Meta(code=c, name=str(r.get("name","")).strip(), market="上市", industry=str(r.get("group","")).strip() or "未分類", ex="tse", yf_symbol=f"{c}.TW")
 
     if include_tpex:
         df2 = _fetch_csv(tpex_raw)
@@ -162,15 +150,8 @@ def load_universe_github(include_tpex: bool) -> Dict[str, Meta]:
             df2.columns = ["type","code","name","ISIN","start","market","group","CFI"][:df2.shape[1]]
         for _, r in df2.iterrows():
             c = str(r.get("code","")).strip()
-            if re.match(r"^\d{4,6}$", c or ""):
-                meta[c] = Meta(
-                    code=c,
-                    name=str(r.get("name","")).strip(),
-                    market="上櫃",
-                    industry=str(r.get("group","")).strip() or "未分類",
-                    ex="otc",
-                    yf_symbol=f"{c}.TWO",
-                )
+            if re.match(r"^\d{4,6}$", c):
+                meta[c] = Meta(code=c, name=str(r.get("name","")).strip(), market="上櫃", industry=str(r.get("group","")).strip() or "未分類", ex="otc", yf_symbol=f"{c}.TWO")
 
     if len(meta) < 300:
         raise ValueError("GitHub 清單取得失敗或數量異常。")
@@ -192,15 +173,13 @@ class MISClient:
         self.inited = False
 
     def init(self):
-        if self.inited:
-            return
+        if self.inited: return
         self.s.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=self.headers, timeout=20, verify=False)
         self.inited = True
 
     def get_quotes(self, ex_ch_list: List[str]) -> List[dict]:
         self.init()
-        if not ex_ch_list:
-            return []
+        if not ex_ch_list: return []
         ex_ch = "%7c".join(ex_ch_list)
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
         r = self.s.get(url, headers=self.headers, timeout=25, verify=False)
@@ -217,14 +196,12 @@ def fetch_mis_snapshot(meta_items: List[Meta], batch_size: int = 70) -> pd.DataF
         ex_list = [f"{m.ex}_{m.code}.tw" for m in chunk]
         try:
             arr = mis.get_quotes(ex_list)
-        except Exception:
-            continue
+        except Exception: continue
         mm = {m.code: m for m in chunk}
         for q in arr:
             c = str(q.get("c","")).strip()
             m = mm.get(c)
-            if not m:
-                continue
+            if not m: continue
             last = fnum(q.get("z"), None)
             prev_close = fnum(q.get("y"), None)
             o = fnum(q.get("o"), None)
@@ -250,9 +227,7 @@ def fetch_mis_snapshot(meta_items: List[Meta], batch_size: int = 70) -> pd.DataF
             })
         time.sleep(0.05)
 
-    if not rows:
-        return pd.DataFrame()
-
+    if not rows: return pd.DataFrame()
     df = pd.DataFrame(rows).drop_duplicates("code")
     df["volume_lots"] = (df["volume_shares"].fillna(0).astype(float) / 1000.0).astype(int)
     df["chg_pct"] = (df["last"] / df["prev_close"] - 1.0) * 100.0
@@ -261,12 +236,11 @@ def fetch_mis_snapshot(meta_items: List[Meta], batch_size: int = 70) -> pd.DataF
     return df
 
 # =========================
-# Daily baseline (candidates only)
+# Daily baseline 
 # =========================
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def build_daily_baseline_for_candidates(candidate_symbols: List[str]) -> pd.DataFrame:
-    if not candidate_symbols:
-        return pd.DataFrame()
+    if not candidate_symbols: return pd.DataFrame()
     period = "400d"
     batch = 60
     rows = []
@@ -274,21 +248,17 @@ def build_daily_baseline_for_candidates(candidate_symbols: List[str]) -> pd.Data
         syms = candidate_symbols[i:i+batch]
         tickers = " ".join(syms)
         try:
-            raw = yf.download(tickers=tickers, period=period, interval="1d", group_by="ticker",
-                              auto_adjust=False, threads=True, progress=False)
-        except Exception:
-            continue
+            raw = yf.download(tickers=tickers, period=period, interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
+        except Exception: continue
 
         for sym in syms:
             try:
                 if isinstance(raw.columns, pd.MultiIndex):
-                    if sym not in raw.columns.get_level_values(0):
-                        continue
+                    if sym not in raw.columns.get_level_values(0): continue
                     df = raw[sym].dropna().copy()
                 else:
                     df = raw.dropna().copy()
-                if df.empty or len(df) < 80:
-                    continue
+                if df.empty or len(df) < 80: continue
 
                 close = df["Close"].astype(float)
                 high = df["High"].astype(float)
@@ -296,7 +266,6 @@ def build_daily_baseline_for_candidates(candidate_symbols: List[str]) -> pd.Data
                 vol  = df["Volume"].astype(float)
 
                 vol_ma20 = float(vol.rolling(20).mean().iloc[-1])
-
                 prev_close = close.shift(1)
                 tr1 = (high - low).abs()
                 tr2 = (high - prev_close).abs()
@@ -318,36 +287,23 @@ def build_daily_baseline_for_candidates(candidate_symbols: List[str]) -> pd.Data
                 range60 = float(high.rolling(60).max().iloc[-1] - low.rolling(60).min().iloc[-1])
                 range20_pct = (range20 / last_close) if last_close else 1.0
                 range60_pct = (range60 / last_close) if last_close else 1.0
-                base_tight_score = float(
-                    (1.0 - min(1.0, range20_pct / (range60_pct + 1e-9))) * 0.6
-                    + (1.0 - min(1.0, (atr20_pct or 999.0) / 8.0)) * 0.4
-                )
+                base_tight_score = float((1.0 - min(1.0, range20_pct / (range60_pct + 1e-9))) * 0.6 + (1.0 - min(1.0, (atr20_pct or 999.0) / 8.0)) * 0.4)
 
                 rows.append({
-                    "yf_symbol": sym,
-                    "vol_ma20_shares": vol_ma20,
-                    "atr20_pct": atr20_pct,
-                    "ret_5d": ret_5d,
-                    "max_ret_10d": max_ret_10d,
-                    "base_len_days": base_len_days,
-                    "base_tight_score": base_tight_score,
+                    "yf_symbol": sym, "vol_ma20_shares": vol_ma20, "atr20_pct": atr20_pct,
+                    "ret_5d": ret_5d, "max_ret_10d": max_ret_10d, "base_len_days": base_len_days, "base_tight_score": base_tight_score,
                 })
-            except Exception:
-                continue
+            except Exception: continue
         time.sleep(0.05)
 
-    if not rows:
-        return pd.DataFrame()
+    if not rows: return pd.DataFrame()
     return pd.DataFrame(rows).drop_duplicates("yf_symbol").set_index("yf_symbol")
 
 # =========================
 # Table renderer
 # =========================
 def render_table_html(title: str, df: pd.DataFrame, columns: List[str], height: int = 560) -> None:
-    if df is None or df.empty:
-        st.info("沒有資料。")
-        return
-
+    if df is None or df.empty: return st.info("沒有資料。")
     def fmt(v):
         if v is None: return ""
         if isinstance(v, float) and math.isnan(v): return ""
@@ -366,105 +322,76 @@ def render_table_html(title: str, df: pd.DataFrame, columns: List[str], height: 
     <!doctype html><html><head><meta charset="utf-8"/>
     <style>
       :root {{ --text:#e5e7eb; --line:rgba(148,163,184,.16); --hi: rgba(148,163,184,.08); }}
-      body {{ margin:0; background: transparent; color: var(--text);
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC","PingFang TC","Microsoft JhengHei", Arial, sans-serif; }}
+      body {{ margin:0; background: transparent; color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }}
       .title {{ padding: 0 0 8px 4px; font-weight: 900; color: #e5e7eb; }}
-      .wrap {{ max-height:{height}px; overflow:auto; border: 1px solid var(--line);
-        border-radius: 16px; background: rgba(15,17,22,.70); }}
+      .wrap {{ max-height:{height}px; overflow:auto; border: 1px solid var(--line); border-radius: 16px; background: rgba(15,17,22,.70); }}
       table {{ width:100%; border-collapse: separate; border-spacing:0; font-size: 12.5px; }}
-      thead th {{
-        position: sticky; top:0; z-index:2;
-        text-align:left; padding: 11px 10px;
-        background: rgba(15,17,22,.98); border-bottom: 1px solid var(--line);
-        white-space: nowrap; font-weight: 900;
-      }}
-      tbody td {{
-        padding: 10px 10px; border-bottom: 1px solid rgba(148,163,184,.10);
-        background: rgba(11,13,18,.92); white-space: nowrap;
-      }}
+      thead th {{ position: sticky; top:0; z-index:2; text-align:left; padding: 11px 10px; background: rgba(15,17,22,.98); border-bottom: 1px solid var(--line); white-space: nowrap; font-weight: 900; }}
+      tbody td {{ padding: 10px 10px; border-bottom: 1px solid rgba(148,163,184,.10); background: rgba(11,13,18,.92); white-space: nowrap; }}
       tbody tr:hover td {{ background: var(--hi); }}
     </style></head>
     <body>
       <div class="title">{html.escape(title)}</div>
-      <div class="wrap">
-        <table>
-          <thead><tr>{head}</tr></thead>
-          <tbody>{''.join(rows)}</tbody>
-        </table>
-      </div>
+      <div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>
     </body></html>
     """
     components.html(html_doc, height=height + 70, scrolling=False)
 
 # =========================
-# Sidebar
+# UI Layout (立即渲染，不卡頓)
 # =========================
 st.sidebar.markdown("### 🧠 懶人設定")
 mode = st.sidebar.selectbox("模式", ["保守", "標準", "積極"], index=1)
 market_mode = st.sidebar.selectbox("市場", ["只掃上市（TWSE）", "上市 + 上櫃（TWSE+TPEX）"], index=0)
 min_lots = st.sidebar.number_input("最低盤中量（張）", min_value=200, max_value=20000, value=1200, step=100)
 dist_upper = st.sidebar.number_input("候選距離漲停(%)", min_value=0.1, max_value=5.0, value=1.0, step=0.1)
-run_scan = st.sidebar.button("🧊 立即掃描（MIS 即時）", use_container_width=True)
+run_scan = st.sidebar.button("🧊 立即啟動掃描", use_container_width=True)
 
-# =========================
-# Header
-# =========================
 now_ts = now_taipei()
 elapsed = minutes_elapsed_in_session(now_ts)
 st.markdown(f"""
 <div class="header-wrap">
   <div>
     <h1 class="title">起漲戰情室</h1>
-    <div class="subtitle">不走本機：GitHub 清單 + MIS 盤中快照 → 少量候選再抓日線</div>
+    <div class="subtitle">秒開防呆版：所有連線與運算皆移至按下按鈕後執行</div>
   </div>
   <div class="pill"><span class="dot"></span> 台北時間 <b>{now_ts.strftime('%H:%M:%S')}</b>　盤中進度 <b>{elapsed}/270</b></div>
 </div>
 """, unsafe_allow_html=True)
 
-include_tpex = (market_mode == "上市 + 上櫃（TWSE+TPEX）")
-
-try:
-    universe = load_universe_github(include_tpex)
-except Exception as e:
-    st.error(f"股票清單抓不到：{e}")
-    st.stop()
-
-meta_items = list(universe.values())
-
-st.markdown(f"""
-<div class="grid">
-  <div class="card"><div class="k">市場</div><div class="v">{html.escape(market_mode)}</div></div>
-  <div class="card"><div class="k">清單檔數</div><div class="v">{len(meta_items):,}<small> 檔</small></div></div>
-  <div class="card"><div class="k">最低量</div><div class="v">{int(min_lots):,}<small> 張</small></div></div>
-  <div class="card"><div class="k">距離漲停</div><div class="v">{float(dist_upper):.1f}<small>%</small></div></div>
-</div>
-""", unsafe_allow_html=True)
-
 st.markdown("""
 <div class="banner">
-<b>你之前卡住/抓不到 5m 的根因：</b> yfinance intraday 限流。<br>
-這版盤中改用 MIS 即時報價（一次抓很多檔），並且日線只抓少量候選，速度會穩很多。
+<b>防卡死設計：</b> 網頁現在會瞬間開啟。請確認左側參數後，按下 <b>「立即啟動掃描」</b>，系統才會開始去網路抓取資料。
 </div>
 """, unsafe_allow_html=True)
 
 # =========================
-# Run scan
+# 按下按鈕後才開始執行網路請求
 # =========================
 if run_scan:
-    with st.spinner("MIS：抓盤中即時快照（大量檔一次抓）..."):
+    include_tpex = (market_mode == "上市 + 上櫃（TWSE+TPEX）")
+    
+    with st.spinner("📦 1/4 正在載入台股清單 (若首次會向 GitHub 請求)..."):
+        try:
+            universe = load_universe_github(include_tpex)
+            meta_items = list(universe.values())
+        except Exception as e:
+            st.error(f"🛑 錯誤：無法連線至 GitHub 抓取清單。錯誤訊息：{e}")
+            st.stop()
+
+    with st.spinner(f"📡 2/4 正在向證交所 MIS 請求 {len(meta_items)} 檔即時報價..."):
         snap = fetch_mis_snapshot(meta_items, batch_size=70)
 
     if snap is None or snap.empty:
-        st.error("MIS 即時資料抓不到（可能網路/環境限制）。")
+        st.error("🛑 錯誤：MIS 即時資料抓不到，可能是網路不穩或非交易時間限制。")
         st.stop()
 
     snap["dist_upper_pct"] = ((snap["upper"] - snap["last"]) / snap["upper"]) * 100.0
     snap.loc[snap["upper"].isna() | (snap["upper"] == 0), "dist_upper_pct"] = None
 
-    # 族群共振（快照版）
+    # 族群共振
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
     st.subheader("🧭 族群共振 Radar（快照版）")
-
     df = snap.copy()
     df["tick"] = df["upper"].fillna(0).astype(float).apply(lambda u: tw_tick(u) if u else 0.05)
     df["near_upper"] = df["last"] >= (df["upper"] - df["tick"])
@@ -476,14 +403,7 @@ if run_scan:
     df["hot"] = df["heat"] >= 65.0
 
     g = df.groupby("industry", dropna=False)
-    sector = g.agg(
-        掃描檔數=("code","count"),
-        熱檔數=("hot","sum"),
-        貼板數=("near_upper","sum"),
-        平均熱度=("heat","mean"),
-        最高熱度=("heat","max"),
-        平均量=("volume_lots","mean")
-    ).reset_index().rename(columns={"industry":"族群名稱"})
+    sector = g.agg(掃描檔數=("code","count"), 熱檔數=("hot","sum"), 貼板數=("near_upper","sum"), 平均熱度=("heat","mean"), 最高熱度=("heat","max"), 平均量=("volume_lots","mean")).reset_index().rename(columns={"industry":"族群名稱"})
     sector["共振分"] = (sector["熱檔數"]*20.0 + sector["貼板數"]*8.0 + sector["平均熱度"]*0.35 + sector["最高熱度"]*0.25).clip(0, 100)
     sector = sector.sort_values(["共振分","熱檔數","貼板數","最高熱度"], ascending=False).head(10).reset_index(drop=True)
     sector.insert(0, "排名", range(1, len(sector)+1))
@@ -504,90 +424,67 @@ if run_scan:
     with st.expander("📋 族群共振排行榜（Top 10）", expanded=True):
         render_table_html("族群共振排行榜", sector, ["排名","族群名稱","共振分","熱檔數","貼板數","掃描檔數","平均熱度","最高熱度","平均量"], height=420)
 
-    # 第一根候選：先快篩，再抓日線
+    # 候選與日線
     st.markdown("<div class='hr'></div>", unsafe_allow_html=True)
-    st.subheader("🚀 第一根漲停候選（少量才抓日線）")
+    st.subheader("🚀 第一根漲停候選")
 
-    pre = snap[
-        (snap["volume_lots"] >= int(min_lots)) &
-        (snap["dist_upper_pct"].fillna(999) <= float(dist_upper))
-    ].copy()
-
+    pre = snap[(snap["volume_lots"] >= int(min_lots)) & (snap["dist_upper_pct"].fillna(999) <= float(dist_upper))].copy()
     if pre.empty:
-        st.warning("目前沒有符合『量大 + 接近漲停』的候選（放寬距離漲停%或降低最低量）。")
+        st.warning("⚠️ 目前盤面上沒有符合『量大 + 接近漲停』的候選標的。")
         st.stop()
 
     pre["yf_symbol"] = pre["code"].apply(lambda c: universe.get(str(c)).yf_symbol if str(c) in universe else f"{c}.TW")
     cand_syms = pre["yf_symbol"].dropna().astype(str).unique().tolist()
 
-    with st.spinner(f"抓日線基準（只算候選 {len(cand_syms)} 檔）..."):
+    with st.spinner(f"📊 3/4 正在為 {len(cand_syms)} 檔初選標的抓取 Yahoo 歷史日線..."):
         base = build_daily_baseline_for_candidates(cand_syms)
 
     if base is None or base.empty:
-        st.error("候選日線抓不到（yfinance 可能被限流）。請稍後重試或收斂候選檔數。")
+        st.error("🛑 錯誤：無法從 Yahoo 取得歷史資料。請稍後重試。")
         st.stop()
 
-    frac = session_fraction(now_ts)
-    rows = []
-    for _, r in pre.iterrows():
-        sym = str(r["yf_symbol"])
-        if sym not in base.index:
-            continue
-        b = base.loc[sym]
+    with st.spinner("⚙️ 4/4 正在計算連板潛力分數..."):
+        frac = session_fraction(now_ts)
+        rows = []
+        for _, r in pre.iterrows():
+            sym = str(r["yf_symbol"])
+            if sym not in base.index: continue
+            b = base.loc[sym]
 
-        vol_ma20 = float(b.get("vol_ma20_shares", 0.0) or 0.0)
-        vol_ratio = (float(r["volume_shares"]) / (vol_ma20 * frac + 1e-9)) if vol_ma20 > 0 else 0.0
+            vol_ma20 = float(b.get("vol_ma20_shares", 0.0) or 0.0)
+            vol_ratio = (float(r["volume_shares"]) / (vol_ma20 * frac + 1e-9)) if vol_ma20 > 0 else 0.0
+            prev_close = float(r["prev_close"]) if pd.notna(r["prev_close"]) and r["prev_close"] else None
+            upper = float(r["upper"]) if pd.notna(r["upper"]) and r["upper"] else None
+            if not prev_close or not upper: continue
 
-        prev_close = float(r["prev_close"]) if pd.notna(r["prev_close"]) and r["prev_close"] else None
-        upper = float(r["upper"]) if pd.notna(r["upper"]) and r["upper"] else None
-        if not prev_close or not upper:
-            continue
+            limit_pct = (upper / prev_close - 1.0) * 100.0
+            hype_thr = 19.0 if limit_pct > 15 else 9.5
+            if float(b.get("max_ret_10d", 0.0) or 0.0) >= hype_thr: continue
 
-        limit_pct = (upper / prev_close - 1.0) * 100.0
-        hype_thr = 19.0 if limit_pct > 15 else 9.5
-        max_ret_10d = float(b.get("max_ret_10d", 0.0) or 0.0)
-        if max_ret_10d >= hype_thr:
-            continue
-
-        score = 0.0
-        score += min(40.0, max(0.0, (float(r["chg_pct"] or 0) * 2.0)))
-        score += min(30.0, max(0.0, (vol_ratio - 1.0) * 10.0))
-        score += min(15.0, max(0.0, (int(b.get("base_len_days", 0) or 0) - 10) * 0.4))
-        score += min(15.0, max(0.0, float(b.get("base_tight_score", 0.0) or 0.0) * 15.0))
-        score = float(max(0.0, min(100.0, score)))
-
-        rows.append({
-            "排名": 0,
-            "代號": r["code"],
-            "名稱": r["name"],
-            "市場": r["market"],
-            "族群": r["industry"],
-            "現價": r["last"],
-            "漲停價": r["upper"],
-            "距離漲停(%)": r["dist_upper_pct"],
-            "較昨收(%)": r["chg_pct"],
-            "累積量(張)": int(r["volume_lots"]),
-            "盤中爆量倍數(線性)": float(vol_ratio),
-            "基底天數": int(b.get("base_len_days", 0) or 0),
-            "基底緊縮分": float(b.get("base_tight_score", 0.0) or 0.0),
-            "ATR20(%)": float(b.get("atr20_pct", 999.0) or 999.0),
-            "近5日漲幅(%)": float(b.get("ret_5d", 0.0) or 0.0),
-            "連板潛力分": float(score),
-        })
+            score = 0.0
+            score += min(40.0, max(0.0, (float(r["chg_pct"] or 0) * 2.0)))
+            score += min(30.0, max(0.0, (vol_ratio - 1.0) * 10.0))
+            score += min(15.0, max(0.0, (int(b.get("base_len_days", 0) or 0) - 10) * 0.4))
+            score += min(15.0, max(0.0, float(b.get("base_tight_score", 0.0) or 0.0) * 15.0))
+            
+            rows.append({
+                "排名": 0, "代號": r["code"], "名稱": r["name"], "市場": r["market"], "族群": r["industry"],
+                "現價": r["last"], "漲停價": r["upper"], "距離漲停(%)": r["dist_upper_pct"], "較昨收(%)": r["chg_pct"],
+                "累積量(張)": int(r["volume_lots"]), "盤中爆量倍數(線性)": float(vol_ratio),
+                "基底天數": int(b.get("base_len_days", 0) or 0), "基底緊縮分": float(b.get("base_tight_score", 0.0) or 0.0),
+                "ATR20(%)": float(b.get("atr20_pct", 999.0) or 999.0), "近5日漲幅(%)": float(b.get("ret_5d", 0.0) or 0.0),
+                "連板潛力分": float(max(0.0, min(100.0, score))),
+            })
 
     if not rows:
-        st.warning("候選有，但『第一根濾網』全部被排除（多半是近10日已嗨過）。")
+        st.warning("⚠️ 所有候選標的皆未通過嚴格的『第一根濾網』(多半是因為近期已經暴漲過)。")
         st.stop()
 
     res = pd.DataFrame(rows).sort_values(["連板潛力分","距離漲停(%)","盤中爆量倍數(線性)"], ascending=[False, True, False]).reset_index(drop=True)
     res["排名"] = range(1, len(res)+1)
 
-    st.success(f"✅ 鎖到 {len(res)} 檔候選（已排序）")
+    st.success(f"✅ 完美鎖定！為您篩選出 {len(res)} 檔『第一根漲停』候選標的。")
 
-    with st.expander("📋 完整榜單（美化表格）", expanded=True):
-        cols_show = [
-            "排名","代號","名稱","市場","族群","現價","漲停價","距離漲停(%)","較昨收(%)",
-            "累積量(張)","盤中爆量倍數(線性)",
-            "基底天數","近5日漲幅(%)","ATR20(%)","基底緊縮分","連板潛力分"
-        ]
+    with st.expander("📋 完整候選榜單（美化表格）", expanded=True):
+        cols_show = ["排名","代號","名稱","市場","族群","現價","漲停價","距離漲停(%)","較昨收(%)","累積量(張)","盤中爆量倍數(線性)","基底天數","近5日漲幅(%)","ATR20(%)","基底緊縮分","連板潛力分"]
         render_table_html("第一根漲停候選", res, cols_show, height=580)
