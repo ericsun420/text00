@@ -1,3 +1,13 @@
+# app.py — 起漲戰情室（第一根漲停 + 連板潛力）＋🧭族群共振 Radar
+# ✅ 不走本機：股票清單只用 GitHub raw
+# ✅ 盤中：MIS 即時報價（避開 yfinance 5m 限流）
+# ✅ 日線：只抓少量候選（避免卡很久）
+#
+# 安裝：
+#   pip install -U streamlit pandas yfinance requests urllib3
+# 執行：
+#   streamlit run app.py
+
 import io
 import math
 import time
@@ -5,7 +15,7 @@ import html
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dtime
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import requests
 import urllib3
@@ -114,11 +124,12 @@ TWSE_RAW = "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/co
 TPEX_RAW = "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv"
 
 def _fetch_csv(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=30, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+    r = requests.get(url, timeout=60, allow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     text = r.text.replace("\r\n", "\n").replace("\r", "\n")
+    # 防呆：拿到 HTML 就直接報錯（避免白跑）
     if "<html" in text[:500].lower():
-        raise ValueError(f"抓到的不是 CSV，url={url}")
+        raise ValueError(f"抓到的不是 CSV（疑似 HTML），url={url}")
     df = pd.read_csv(io.StringIO(text), dtype=str, engine="python", on_bad_lines="skip")
     df.columns = [str(c).strip() for c in df.columns]
     return df
@@ -126,15 +137,24 @@ def _fetch_csv(url: str) -> pd.DataFrame:
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def load_universe_github(include_tpex: bool) -> Dict[str, Meta]:
     meta: Dict[str, Meta] = {}
+
     df1 = _fetch_csv(TWSE_RAW)
     if "code" not in df1.columns:
+        # 兼容沒有 header 的情況
         df1 = pd.read_csv(io.StringIO(df1.to_csv(index=False, header=False)), header=None, dtype=str, engine="python")
         df1.columns = ["type","code","name","ISIN","start","market","group","CFI"][:df1.shape[1]]
 
     for _, r in df1.iterrows():
         c = str(r.get("code","")).strip()
         if re.match(r"^\d{4,6}$", c or ""):
-            meta[c] = Meta(code=c, name=str(r.get("name","")).strip(), market="上市", industry=str(r.get("group","")).strip() or "未分類", ex="tse", yf_symbol=f"{c}.TW")
+            meta[c] = Meta(
+                code=c,
+                name=str(r.get("name","")).strip(),
+                market="上市",
+                industry=str(r.get("group","")).strip() or "未分類",
+                ex="tse",
+                yf_symbol=f"{c}.TW",
+            )
 
     if include_tpex:
         df2 = _fetch_csv(TPEX_RAW)
@@ -144,7 +164,14 @@ def load_universe_github(include_tpex: bool) -> Dict[str, Meta]:
         for _, r in df2.iterrows():
             c = str(r.get("code","")).strip()
             if re.match(r"^\d{4,6}$", c or ""):
-                meta[c] = Meta(code=c, name=str(r.get("name","")).strip(), market="上櫃", industry=str(r.get("group","")).strip() or "未分類", ex="otc", yf_symbol=f"{c}.TWO")
+                meta[c] = Meta(
+                    code=c,
+                    name=str(r.get("name","")).strip(),
+                    market="上櫃",
+                    industry=str(r.get("group","")).strip() or "未分類",
+                    ex="otc",
+                    yf_symbol=f"{c}.TWO",
+                )
 
     if len(meta) < 300:
         raise ValueError(f"股票清單數量異常：{len(meta)}（可能網路被擋）")
@@ -398,7 +425,7 @@ st.markdown(f"""
 
 st.markdown("""
 <div class="banner">
-<b>防卡死修正版：</b>所有空白鍵已全面消毒。若依然卡住，請務必點擊右下角 `Manage app` -> 右上角選單 -> `Reboot app` 重啟主機！
+<b>如果你之前看到白畫面：</b>通常是「開頁就卡在下載/解析清單」或 raw URL 轉址回 HTML。這版已修正：只在你按掃描時才抓清單，且 raw URL 改成穩定路徑。
 </div>
 """, unsafe_allow_html=True)
 
