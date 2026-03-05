@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 5.6｜工業級防彈架構｜血統提純錄取｜Apple Pro 旗艦版
+# app.py — 起漲戰情室｜戰神 5.8｜容錯救援機制｜台北時區校準｜Apple Pro 旗艦版
 import io
 import math
 import time
@@ -44,16 +44,17 @@ def yf_download_daily(syms):
     return yf.download(tickers=" ".join(syms), period="120d", interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
 
 # =========================
-# UI / THEME
+# UI / THEME (Apple Style)
 # =========================
-st.set_page_config(page_title="WarRoom Pro 5.6", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro 5.8", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
     .block-container { padding-top: 2rem; max-width: 1200px; }
     [data-testid="stSidebar"] { display: none !important; }
     .title { font-size: 52px; font-weight: 800; background: linear-gradient(180deg, #ffffff, #a1a1a6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
-    .pro-card { background: rgba(28, 28, 30, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 24px; margin-bottom: 16px; }
+    .pro-card { background: rgba(28, 28, 30, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 24px; margin-bottom: 16px; transition: 0.3s ease; }
+    .pro-card:hover { border: 1px solid rgba(0, 122, 255, 0.4); transform: translateY(-3px); }
     .stock-name { font-size: 20px; font-weight: 700; color: #ffffff; }
     .price-large { font-size: 32px; font-weight: 700; color: #ffffff; font-variant-numeric: tabular-nums; }
     .tag-pro { padding: 4px 12px; border-radius: 8px; font-size: 11px; font-weight: 700; background: rgba(0, 122, 255, 0.15); color: #0a84ff; border: 1px solid rgba(0, 122, 255, 0.3); }
@@ -68,6 +69,14 @@ st.markdown("""
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 
+# ✅ ✅ ✅ 修正 1：時區精準轉換
+def idx_date_taipei(idx):
+    try:
+        if getattr(idx, "tz", None) is not None:
+            return idx.tz_convert("Asia/Taipei").date
+    except: pass
+    return idx.date
+
 def tw_tick(price):
     return 0.01 if price < 10 else 0.05 if price < 50 else 0.1 if price < 100 else 0.5 if price < 500 else 1.0 if price < 1000 else 5.0
 
@@ -79,7 +88,7 @@ def calc_limit_up(prev_close, limit_pct=0.10):
 
 def infer_daily_limit(pp, cp):
     l10 = calc_limit_up(pp, 0.10); l20 = calc_limit_up(pp, 0.20)
-    tol20 = max(2 * tw_tick(l20), l20 * 0.001)
+    tol20 = max(tw_tick(l20), l20 * 0.0005) 
     if abs(cp - l20) <= tol20 and abs(cp - l20) < abs(cp - l10): return l20
     return l10
 
@@ -105,14 +114,10 @@ def get_stock_list():
             r = session.get(url, timeout=15); r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
-            c_col = col_map.get('code') or df.columns[1]
-            n_col = col_map.get('name') or df.columns[2]
-            t_col = col_map.get('type') or df.columns[0] # ✅ 補齊型態欄位
+            c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
             for _, row in df.iterrows():
-                # ✅ ✅ 濾掉 ETF/權證（避免 meta 污染）
-                stype = str(row.get(t_col, ""))
-                if "權證" in stype or "ETF" in stype: continue
-                
+                stype = str(row.get(t_col, "")) if t_col else ""
+                if t_col and ("權證" in stype or "ETF" in stype): continue
                 code = str(row[c_col]).strip()
                 if len(code) == 4 and code.isdigit():
                     meta[code] = {"name": str(row[n_col]), "ex": ex}
@@ -137,7 +142,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         chunk = codes[i:i+80]
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
-        status_placeholder.update(label=f"📡 快篩雷達中 ({i}/{len(codes)})", state="running")
+        status_placeholder.update(label=f"📡 雷達掃描中... ({i}/{len(codes)})", state="running")
         try:
             r = session.get(url, headers=headers, timeout=12)
             data = r.json().get("msgArray", [])
@@ -154,7 +159,6 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                     mis_diag["mis_parse_fail"] += 1; continue
                 last, upper, prev_close, vol_sh = float(z), float(u), float(y), float(v or 0)
                 if upper <= 0 or prev_close <= 0: mis_diag["mis_parse_fail"] += 1; continue
-                
                 mis_diag["mis_parse_ok"] += 1
                 dist_pct = max(0.0, ((upper - last) / upper) * 100)
                 if (vol_sh / 1000) >= vol_limit and dist_pct <= dist_limit:
@@ -170,7 +174,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         time.sleep(0.12 if not is_test else 0.01)
     return pd.DataFrame(rows), err_mis, mis_diag
 
-def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag):
+def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloodline):
     stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "非連板標的": []}
     yf_diag = {"yf_symbols": 0, "yf_fail": 0, "other_err": 0}
     if candidates_df.empty: return pd.DataFrame(), stats, yf_diag
@@ -180,18 +184,28 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag):
     syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
     yf_diag["yf_symbols"] = len(syms)
     
-    # ✅ ✅ ✅ 防護下載例外
-    t_yf = time.perf_counter()
+    # ✅ ✅ ✅ 修正 2：二分救援下載邏輯
+    t_yf_start = time.perf_counter()
+    raw_daily = None
     try:
         raw_daily = yf_download_daily(syms)
     except Exception as e:
-        diag["t_yf"] = time.perf_counter() - t_yf
-        yf_diag["other_err"] += 1
-        diag_err(diag, e, "YF_DOWNLOAD")
-        return pd.DataFrame(), stats, yf_diag
-    
-    diag["t_yf"] = time.perf_counter() - t_yf
-    if raw_daily is None: return pd.DataFrame(), stats, yf_diag
+        diag_err(diag, e, "YF_BULK_FAIL")
+        # 啟動拆分救援
+        mid = max(1, len(syms)//2)
+        parts = [syms[:mid], syms[mid:]]
+        frames = []
+        for part in parts:
+            try:
+                if part: frames.append(yf_download_daily(part))
+            except Exception as e2:
+                diag_err(diag, e2, "YF_PART_FAIL"); continue
+        frames = [f for f in frames if f is not None and not getattr(f, "empty", False)]
+        if frames: raw_daily = pd.concat(frames, axis=1)
+
+    diag["t_yf"] = time.perf_counter() - t_yf_start
+    if raw_daily is None or getattr(raw_daily, "empty", False):
+        yf_diag["other_err"] += 1; return pd.DataFrame(), stats, yf_diag
 
     results, today_date = [], now_ts.date()
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
@@ -203,19 +217,20 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag):
         c, name = r["code"], meta_dict[r["code"]]["name"]
         sym = f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}"
         try:
-            # ✅ ✅ ✅ 欄位缺失保護
             if isinstance(raw_daily.columns, pd.MultiIndex):
                 if sym not in raw_daily.columns.get_level_values(0):
                     yf_diag["yf_fail"] += 1; continue
                 dfD = raw_daily[sym].dropna()
-            else:
-                dfD = raw_daily.dropna()
+            else: dfD = raw_daily.dropna()
                 
             if len(dfD) < 30: yf_diag["yf_fail"] += 1; continue
             
-            past_df = dfD.iloc[:-1].copy() if dfD.index[-1].date() == today_date else dfD.copy()
-            vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
+            # ✅ ✅ ✅ 修正 1：精準時區對齊
+            dates_tw = idx_date_taipei(dfD.index)
+            past_df = dfD[dates_tw < today_date].copy()
+            if len(past_df) < 30: yf_diag["yf_fail"] += 1; continue
             
+            vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
@@ -223,12 +238,11 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag):
                 if cp >= (lim - tw_tick(lim)): past_boards += 1
                 else: break
 
-            # ✅ ✅ 連板血統門檻：past_boards >= 1 
-            if (not is_test) and past_boards < 1:
+            # 血統門檻 (使用 Toggle)
+            if use_bloodline and (not is_test) and past_boards < 1:
                 stats["非連板標的"].append(f"{c} {name}"); continue
 
-            min_bid = 80_000 if r["last"] < 50 else 120_000 if r["last"] < 100 else 200_000
-            is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= min_bid)
+            is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= (80000 if r["last"]<50 else 120000 if r["last"]<100 else 200000))
             vol_ratio = r["vol_sh"] / (vol_ma20_sh * frac + 1e-9)
             if vol_ratio < (0.5 if is_test else 1.3): stats["爆量不足"].append(f"{c} {name}"); continue
             
@@ -247,24 +261,31 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag):
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 5.6</div>', unsafe_allow_html=True)
-col_cfg = st.columns([1, 1, 1, 1])
+st.markdown('<div class="title">WarRoom Pro 5.8</div>', unsafe_allow_html=True)
+col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
+with col_cfg[1]: use_bloodline = st.toggle("🛡️ 血統證明", value=True)
 
-if st.button("🚀 啟動工業級掃描"):
+if st.button("🚀 啟動全市場秒級偵測"):
     t0, diag = time.perf_counter(), diag_init()
     with st.status("⚡ 核心運作中...", expanded=True) as status:
         t = time.perf_counter(); meta = get_stock_list()
         diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
+        # ✅ ✅ 修正 A：Meta 存疑監控
+        if len(meta) < 500: diag_err(diag, Exception(f"Meta 過少 ({len(meta)})"), "META_SUSPECT")
+        
         t = time.perf_counter(); now_ts = now_taipei()
         pre_df, mis_err, mis_diag = fast_mis_scan(meta, status, now_ts, is_test, diag)
-        diag["t_mis"] = time.perf_counter() - t; diag.update(mis_diag); diag["cand_total"] = len(pre_df)
+        diag["t_mis"] = time.perf_counter() - t; diag.update(mis_diag)
+        # ✅ ✅ 修正 4：診斷數值同步
+        diag["cand_total"] = mis_diag.get("mis_rows", len(pre_df))
+        
         t = time.perf_counter()
-        final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag)
+        final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag, use_bloodline)
         diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
         diag["total"] = time.perf_counter() - t0
         status.update(label="✅ 分析完成", state="complete")
-    st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test}
+    st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test, "use_bloodline": use_bloodline}
 
 scan = st.session_state.get("last_scan")
 if scan:
@@ -275,11 +296,11 @@ if scan:
     m2.metric("錄取檔數", len(res))
     total_parse = d.get("mis_parse_ok", 0) + d.get("mis_parse_fail", 0)
     m3.metric("資料品質", f"{(d.get('mis_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
-    m4.metric("系統異常", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
+    m4.metric("監控異常", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
 
     with st.expander("🧪 系統診斷 (效能/資料源監控)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("MIS 回傳", d.get("mis_seen")); c2.metric("解析成功", d.get("mis_parse_ok"))
+        c1.metric("全市場", d.get("meta_count")); c2.metric("MIS 有效", d.get("mis_parse_ok"))
         c3.metric("YF 失敗", d.get("yf_fail")); c4.metric("系統錯誤", d.get("other_err"))
         st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
         if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
