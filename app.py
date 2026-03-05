@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神修正版 3.3｜1~N 根連板通吃｜精準漲停與連線穩定優化
+# app.py — 起漲戰情室｜戰神修正版 3.4｜1~N 根連板通吃｜動態濾網與精度優化
 import io
 import math
 import time
@@ -16,7 +16,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="起漲戰情室｜戰神修正版 3.3", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室｜戰神旗艦版", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 
 CSS = """
 <style>
@@ -47,12 +47,20 @@ st.markdown(CSS, unsafe_allow_html=True)
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 
-def get_vol_frac(ts):
+def get_vol_frac_and_dist(ts):
     m = int((datetime.combine(ts.date(), ts.time()) - datetime.combine(ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
-    if m <= 30: return 0.12
-    elif m <= 120: return 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0)
-    else: return min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0))
+    
+    # 【核心修正 5】: 越靠近收盤，距離要求越嚴格
+    if m <= 60: dist_lim = 3.1     # 09:00-10:00
+    elif m <= 180: dist_lim = 2.2  # 10:00-12:00
+    else: dist_lim = 1.5           # 12:00-13:30 (含盤後複盤)
+    
+    if m <= 30: frac = 0.12
+    elif m <= 120: frac = 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0)
+    else: frac = min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0))
+    
+    return frac, dist_lim
 
 def tw_tick(price):
     if price < 10: return 0.01
@@ -62,7 +70,6 @@ def tw_tick(price):
     if price < 1000: return 1.00
     return 5.00
 
-# 【核心修正 1】: 漲停價向下取整到 Tick，絕對不超標
 def calc_limit_up(prev_close, limit_pct=0.10):
     raw = prev_close * (1.0 + limit_pct)
     tick = tw_tick(raw)
@@ -79,7 +86,7 @@ def split_nums(s):
     return out
 
 # =========================
-# ENGINE 1: 股票清單
+# ENGINE 1: 股票清單 (強化型)
 # =========================
 @st.cache_data(ttl=24*3600, show_spinner=False)
 def get_stock_list():
@@ -89,13 +96,11 @@ def get_stock_list():
     for ex, url in urls:
         try:
             r = requests.get(url, timeout=15, verify=False)
-            df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str)
+            # 【核心修正 1】: 增加 on_bad_lines 與 engine 保護
+            df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
-            c_col = col_map.get('code') or df.columns[1]
-            n_col = col_map.get('name') or df.columns[2]
-            g_col = col_map.get('group') or df.columns[6]
-            t_col = col_map.get('type') or df.columns[0]
-
+            c_col, n_col, g_col, t_col = col_map.get('code'), col_map.get('name'), col_map.get('group'), col_map.get('type')
+            
             for _, row in df.iterrows():
                 code = str(row[c_col]).strip()
                 if len(code) == 4 and code.isdigit():
@@ -109,29 +114,27 @@ def get_stock_list():
     return meta
 
 # =========================
-# ENGINE 2: MIS 盤中快篩 (Headers 優化)
+# ENGINE 2: MIS 盤中快篩 (動態濾網)
 # =========================
-def fast_mis_scan(meta_dict, status_placeholder):
-    # 【核心修正 2】: 補上模擬真人的 Headers
+def fast_mis_scan(meta_dict, status_placeholder, now_ts):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
-        "Accept": "application/json,text/plain,*/*",
     }
     s = requests.Session()
     try: s.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=headers, timeout=15, verify=False)
     except: pass
     
+    _, dist_limit = get_vol_frac_and_dist(now_ts)
     codes = list(meta_dict.keys())
-    rows = []
+    rows, err_mis = [], 0
     batch_size = 80 
-    total_batches = math.ceil(len(codes) / batch_size)
     
     for i in range(0, len(codes), batch_size):
         chunk = codes[i:i+batch_size]
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
-        status_placeholder.update(label=f"📡 MIS 盤中快篩中 ({i//batch_size + 1}/{total_batches})...", state="running")
+        status_placeholder.update(label=f"📡 MIS 快篩中 ({i//batch_size + 1}/{math.ceil(len(codes)/batch_size)})...", state="running")
         
         try:
             r = s.get(url, headers=headers, timeout=12, verify=False)
@@ -143,42 +146,44 @@ def fast_mis_scan(meta_dict, status_placeholder):
                 if not z or z == "-" or not u or u == "-" or not y or y == "-" or float(y) == 0 or float(u) <= 0: continue
                 
                 last, upper, prev_close = float(z), float(u), float(y)
-                vol_lots = int(float(v or 0) / 1000)
-                
-                # 【核心修正 4】: 避免資料不同步造成距離為負
+                vol_shares = float(v or 0)
                 dist_pct = max(0.0, ((upper - last) / upper) * 100)
                 
-                if vol_lots >= 800 and dist_pct <= 3.1:
-                    bp, bv, ap, av = split_nums(q.get("b")), split_nums(q.get("g")), split_nums(q.get("a")), split_nums(q.get("f"))
+                # 成交量門檻：800張
+                if (vol_shares / 1000) >= 800 and dist_pct <= dist_limit:
                     rows.append({
                         "code": c, "last": last, "upper": upper, "dist": dist_pct, 
-                        "vol_lots": vol_lots, "prev_close": prev_close,
+                        "vol_shares": vol_shares, "prev_close": prev_close,
                         "high": float(q.get("h") if q.get("h")!="-" else last),
                         "low": float(q.get("l") if q.get("l")!="-" else last),
-                        "bid_p1": bp[0] if bp else 0, "bid_v1": bv[0] if bv else 0,
-                        "ask_p1": ap[0] if ap else 0, "ask_v1": av[0] if av else 0
+                        "b_prices": split_nums(q.get("b")), "b_vols": split_nums(q.get("g")),
+                        "a_prices": split_nums(q.get("a")), "a_vols": split_nums(q.get("f"))
                     })
-        except: pass
-        time.sleep(0.05)
-    return pd.DataFrame(rows)
+        except: 
+            # 【核心修正 2】: 記錄錯誤次數
+            err_mis += 1
+            
+    return pd.DataFrame(rows), err_mis
 
 # =========================
-# ENGINE 3: 核心濾網
+# ENGINE 3: 核心濾網 (精度加固)
 # =========================
-def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
+def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder, mis_err):
     if candidates_df.empty: return pd.DataFrame()
     
-    candidates_df = candidates_df.sort_values(["dist", "vol_lots"], ascending=[True, False]).head(80)
-    stats = {"Total": len(candidates_df), "NotLocked": 0, "Hype": 0, "Pullback": 0, "VolRatio": 0, "WeakClose": 0, "Err": 0, "YF_Fail": 0}
+    candidates_df = candidates_df.sort_values(["dist", "vol_shares"], ascending=[True, False]).head(80)
+    stats = {"Total": len(candidates_df), "NotLocked": 0, "Hype": 0, "Pullback": 0, "VolRatio": 0, "WeakClose": 0, "Err": 0, "YF_Fail": 0, "MIS_Err": mis_err}
     syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
-    status_placeholder.update(label=f"📊 正在深度運算 {len(syms)} 檔候選股...", state="running")
     
     try:
         raw_daily = yf.download(tickers=" ".join(syms), period="100d", interval="1d", group_by="ticker", auto_adjust=False, threads=False, progress=False)
-    except: return pd.DataFrame()
+        # 【核心修正 3】: yf 資料結構多重保護
+        if len(syms) > 1 and not isinstance(raw_daily.columns, pd.MultiIndex):
+            stats["YF_Fail"] += 1; return pd.DataFrame(), stats
+    except: return pd.DataFrame(), stats
 
     results = []
-    frac = get_vol_frac(now_ts)
+    frac, _ = get_vol_frac_and_dist(now_ts)
     today_date = now_ts.date()
 
     for _, r in candidates_df.iterrows():
@@ -186,20 +191,12 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
         sym = f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}"
         try:
             dfD = raw_daily[sym].dropna() if isinstance(raw_daily.columns, pd.MultiIndex) else raw_daily.dropna()
-            if len(dfD) < 30: 
-                stats["YF_Fail"] += 1; continue
+            if len(dfD) < 30: stats["YF_Fail"] += 1; continue
 
+            # 日線與連板
             has_today = dfD.index[-1].date() == today_date
             past_df = dfD.iloc[:-1].copy() if has_today else dfD.copy()
             
-            # 一字板數學校護
-            rng_raw = r["high"] - r["low"]
-            if rng_raw <= 2 * tw_tick(r["upper"]):
-                close_pos = 1.0
-            else:
-                close_pos = (r["last"] - r["low"]) / rng_raw
-
-            # 逼近法判斷制度與連板
             past_boards = 0
             if len(past_df) >= 10:
                 past_10 = past_df.tail(10)
@@ -212,55 +209,54 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
                     if cp >= (daily_lim - tw_tick(daily_lim)): past_boards += 1
                     else: break
             
-            # 階段標籤
-            if past_boards == 0: stage_label, stage_class, stage_bonus = "🚀 第一根", "tag-stage1", 10.0
-            elif past_boards == 1: stage_label, stage_class, stage_bonus = "🔥 第二連", "tag-stage2", 5.0
-            elif past_boards == 2: stage_label, stage_class, stage_bonus = "⚠️ 第三連", "tag-stage3", -5.0
-            else: stage_label, stage_class, stage_bonus = f"💀 第{past_boards+1}連", "tag-stage4", -15.0
+            stage_label, stage_class, stage_bonus = ("🚀 第一根", "tag-stage1", 10.0) if past_boards == 0 else \
+                                                     ("🔥 第二連", "tag-stage2", 5.0) if past_boards == 1 else \
+                                                     ("⚠️ 第三連", "tag-stage3", -5.0) if past_boards == 2 else \
+                                                     (f"💀 第{past_boards+1}連", "tag-stage4", -15.0)
 
-            # Hype 排除 (只有第一根才排除近 10 日漲停股)
+            # Hype 排除 (逼近法)
             if past_boards == 0:
                 had_limit_past = False
                 for j in range(len(past_df)-1, max(1, len(past_df)-10), -1):
                     cp_j, pp_j, hp_j = float(past_df["Close"].iloc[j]), float(past_df["Close"].iloc[j-1]), float(past_df["High"].iloc[j])
                     l10_j, l20_j = calc_limit_up(pp_j, 0.10), calc_limit_up(pp_j, 0.20)
                     d10_j, d20_j = min(abs(cp_j - l10_j), abs(hp_j - l10_j)), min(abs(cp_j - l20_j), abs(hp_j - l20_j))
-                    use20_j = (d20_j < d10_j) and (d20_j <= 2 * tw_tick(l20_j))
-                    lim_j = l20_j if use20_j else l10_j
+                    lim_j = l20_j if (d20_j < d10_j and d20_j <= 2*tw_tick(l20_j)) else l10_j
                     if cp_j >= (lim_j - tw_tick(lim_j)): had_limit_past = True; break
                 if had_limit_past: stats["Hype"] += 1; continue
 
-            # 【核心修正 3】: 鎖死判定與異常賣量防禦
-            bid_lots1 = int(r["bid_v1"]/1000)
-            ask_lots1 = int(r["ask_v1"]/1000)
-            has_ask = r["ask_p1"] > 0
-            ask_vol_unknown = has_ask and (r["ask_v1"] <= 0)
+            # 【核心修正 4】: 使用股數直接計算比例，避免 int(x/1000) 失真
+            bid_shares1 = r["b_vols"][0] if r["b_vols"] else 0
+            ask_shares1 = r["a_vols"][0] if r["a_vols"] else 0
+            has_ask = r["a_prices"] and r["a_prices"][0] > 0
+            ask_vol_unknown = has_ask and (ask_shares1 <= 0)
 
-            is_locked = (r["bid_p1"] >= r["upper"] - tw_tick(r["upper"])) and (bid_lots1 >= 200)
-            ask_at_upper = (not has_ask) or (r["ask_p1"] >= r["upper"] - tw_tick(r["upper"]))
+            is_locked = (r["b_prices"] and r["b_prices"][0] >= r["upper"] - tw_tick(r["upper"])) and (bid_shares1 >= 200000) # 20萬股=200張
+            ask_at_upper = (not has_ask) or (r["a_prices"] and r["a_prices"][0] >= r["upper"] - tw_tick(r["upper"]))
             
             if is_locked:
-                if not ask_at_upper: 
-                    is_locked = False
+                if not ask_at_upper: is_locked = False
                 elif not ask_vol_unknown:
-                    if ask_lots1 > max(150, bid_lots1 * 0.6): is_locked = False
+                    # 改用股數直接比對比例，精準萬分之五
+                    if ask_shares1 > max(150000, bid_shares1 * 0.6): is_locked = False
             
             if not is_locked: stats["NotLocked"] += 1
 
-            # 分母安全檢查
-            vol_ma20_lots = float(dfD["Volume"].rolling(20).mean().iloc[-1]) / 1000
-            if not (vol_ma20_lots > 0):
-                stats["YF_Fail"] += 1; continue
+            # 【核心修正 3】: vol_ma20 分母守衛
+            vol_ma20_shares = float(dfD["Volume"].rolling(20).mean().iloc[-1])
+            if not (vol_ma20_shares > 0): stats["YF_Fail"] += 1; continue
 
-            vol_ratio = r["vol_lots"] / (vol_ma20_lots * frac + 1e-9)
+            vol_ratio = r["vol_shares"] / (vol_ma20_shares * frac + 1e-9)
             if vol_ratio < 1.3: stats["VolRatio"] += 1; continue
 
-            # 瑞軒型一致性濾網
+            # 一字板校護與一致性
+            rng_raw = r["high"] - r["low"]
+            close_pos = 1.0 if rng_raw <= 2 * tw_tick(r["upper"]) else (r["last"] - r["low"]) / rng_raw
             pullback = (r["high"] - r["last"]) / max(1e-9, r["high"])
+            
             if pullback > 0.0039: stats["Pullback"] += 1; continue
             if close_pos < 0.80: stats["WeakClose"] += 1; continue
 
-            # 綜合計分
             score = 40.0 + stage_bonus + (15.0 if is_locked else 0.0)
             score += 15.0 * min(1.0, max(0.0, (close_pos - 0.85) / 0.15))
             score += 15.0 * min(1.0, max(0.0, (vol_ratio - 1.5) / 2.5))
@@ -268,23 +264,20 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, status_placeholder):
             results.append({
                 "代號": c, "名稱": meta_dict[c]["name"], "族群": meta_dict[c]["ind"],
                 "現價": r["last"], "距離(%)": r["dist"], "較昨收(%)": ((r["last"]/r["prev_close"])-1)*100, 
-                "累積量": r["vol_lots"], "爆量x": vol_ratio, "狀態": "鎖死" if is_locked else "未鎖", 
-                "買一": bid_lots1, "賣一(張)": ask_lots1 if not ask_vol_unknown else 0,
-                "賣一狀態": "正常" if not ask_vol_unknown else "未知",
+                "累積量": int(r["vol_shares"]/1000), "爆量x": vol_ratio, "狀態": "鎖死" if is_locked else "未鎖", 
+                "買一": int(bid_shares1/1000), "賣一": int(ask_shares1/1000) if not ask_vol_unknown else 0,
                 "連板序號": past_boards + 1, "潛力分": max(0.0, min(100.0, score)),
                 "階段": stage_label, "Class": stage_class
             })
         except: stats["Err"] += 1
 
-    with st.expander("📊 掃描統計戰報 (淘汰原因追蹤)", expanded=False):
-        st.json(stats)
-    return pd.DataFrame(results).sort_values("潛力分", ascending=False).reset_index(drop=True) if results else pd.DataFrame()
+    return pd.DataFrame(results).sort_values("潛力分", ascending=False).reset_index(drop=True) if results else pd.DataFrame(), stats
 
 # =========================
 # MAIN APP
 # =========================
 st.markdown('<div class="title">🧊 起漲戰情室</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">戰神修正版 3.3 ｜ 精準向下取整漲停價 ｜ 穩定 MIS 連線</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">戰神修正 3.4 ｜ 核心精度優化 ｜ 排除資料延遲與一字板誤判</div>', unsafe_allow_html=True)
 
 run_scan = st.button("🚀 啟動掃描 (自動鎖定強勢先機)", use_container_width=True)
 
@@ -292,13 +285,17 @@ if run_scan:
     with st.status("⚡ 狙擊中...", expanded=True) as status:
         try:
             meta = get_stock_list()
-            pre_df = fast_mis_scan(meta, status)
+            pre_df, mis_err = fast_mis_scan(meta, status, now_taipei())
             if pre_df.empty:
-                status.update(label="✅ 掃描完畢", state="complete"); st.info("😴 目前沒標的。"); st.stop()
-            final_res = core_filter_engine(pre_df, meta, now_taipei(), status)
+                status.update(label="✅ 掃描完畢", state="complete")
+                st.info(f"😴 目前沒標的。 (MIS錯誤: {mis_err})"); st.stop()
+            final_res, stats = core_filter_engine(pre_df, meta, now_taipei(), status, mis_err)
             status.update(label="✅ 計算完成！", state="complete")
         except Exception as e:
             st.error(f"系統崩潰：{e}"); st.stop()
+
+    with st.expander("📊 掃描統計戰報 (淘汰原因追蹤)", expanded=False):
+        st.json(stats)
 
     if final_res.empty:
         st.warning("⚠️ 標的皆被濾網剔除，請見上方統計展開。")
@@ -319,7 +316,7 @@ if run_scan:
                     </div>
                     <div style="display:flex; justify-content:space-between; font-size:13px; color:#9ca3af; margin-top:6px;">
                         <span>潛力分: <b style="color:#a3e635;">{r['潛力分']:.1f}</b></span>
-                        <span>買/賣: <b>{r['買一']}/{r['賣一(張)']}</b></span>
+                        <span>買/賣: <b>{r['買一']}/{r['賣一']}</b></span>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
