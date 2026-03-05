@@ -9,8 +9,8 @@
 # 執行：
 #   streamlit run app.py
 
-import math
 import io
+import math
 import time
 import html
 import re
@@ -969,4 +969,5 @@ if run_scan:
         render_table_html("第一根漲停候選", res, cols_show, height=580)
 
 st.caption("這版盤中不靠 yfinance 5m（避免限流），用 MIS 即時報價做全市場快照；日線只針對少量候選才抓，所以不會卡在『建立日線基準』。")
+
 
