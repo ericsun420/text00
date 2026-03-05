@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 7.0 終極破壁版｜SSL 強制通行｜Ultra Pro 奢華介面
+# app.py — 起漲戰情室｜戰神 7.1 終極破壁版｜全中文專業介面｜Ultra Pro
 import io
 import math
 import time
@@ -56,7 +56,7 @@ def yf_download_daily(syms):
 # =========================
 # UI / THEME (Ultra Pro Design)
 # =========================
-st.set_page_config(page_title="WarRoom Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="起漲戰情室 Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     /* 深邃宇宙黑背景 */
@@ -70,7 +70,7 @@ st.markdown("""
     
     /* 頂部標題 */
     .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
-    .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px; text-transform: uppercase;}
+    .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px;}
     
     /* 奢華流光卡片 */
     .pro-card { 
@@ -93,7 +93,7 @@ st.markdown("""
     /* 卡片內文字 */
     .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
     .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
-    .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px; text-transform: uppercase;}
+    .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px;}
     .fail-tag { display: inline-block; padding: 6px 12px; background: rgba(244, 63, 94, 0.05); color: #f43f5e; border-radius: 8px; margin: 4px; font-size: 12px; border: 1px solid rgba(244, 63, 94, 0.15); font-weight: 600;}
     
     /* 頂級按鈕 */
@@ -115,7 +115,7 @@ st.markdown("""
     /* 美化 Streamlit 預設 Metric */
     [data-testid="stMetric"] { background: rgba(20,20,20,0.6); padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.03); }
     [data-testid="stMetricValue"] { font-size: 32px !important; font-weight: 900 !important; color: #f1f5f9 !important; }
-    [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; text-transform: uppercase; letter-spacing: 1px; }
+    [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; letter-spacing: 1px; }
     
     /* Expander 美化 */
     [data-testid="stExpander"] { background: transparent !important; border: 1px solid rgba(255,255,255,0.05) !important; border-radius: 16px !important; }
@@ -170,7 +170,6 @@ def get_stock_list():
             ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
         try:
-            # ✅ 強制略過 SSL 驗證 (解決 SSLError)
             r = session.get(url, timeout=15, verify=False); r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
@@ -188,7 +187,6 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     session, rows, err_mis = make_retry_session(), [], 0
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    # ✅ 強制略過 SSL 驗證 (解決 SSLError 阻擋整個流程)
     try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=headers, timeout=10, verify=False)
     except Exception as e: diag_err(diag, e, "MIS_WARMUP")
 
@@ -204,7 +202,6 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
         status_placeholder.update(label=f"📡 穿透雷達掃描中... ({i}/{len(codes)})", state="running")
         try:
-            # ✅ 強制略過 SSL 驗證
             r = session.get(url, headers=headers, timeout=12, verify=False)
             data = r.json().get("msgArray", [])
         except:
@@ -215,7 +212,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
             c = q.get("c")
             if not c or c not in meta_dict: continue 
             try:
-                z, u, v, y = q.get("z"), q.get("u"), q.get("v"), q.get("y")
+                z, u, v, y = q.get("z"), u=q.get("u"), v=q.get("v"), y=q.get("y")
                 if z in (None, "", "-", "—") or u in (None, "", "-", "—") or y in (None, "", "-", "—", "0"):
                     mis_diag["mis_parse_fail"] += 1; continue
                 last, upper, prev_close, vol_sh = float(z), float(u), float(y), float(v or 0)
@@ -334,27 +331,35 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                     yf_diag["yf_fail"] += 1; continue
                 df_sym = raw_daily[sym]
             else: df_sym = raw_daily
+            
             if not {"Close", "Volume"}.issubset(set(df_sym.columns)):
                 yf_diag["yf_fail"] += 1; continue
+                
             dfD = df_sym[["Close", "Volume"]].dropna()
             if len(dfD) < 30: yf_diag["yf_fail"] += 1; continue
+            
             dates_tw = idx_date_taipei(dfD.index)
             past_df = dfD[dates_tw < today_date].copy()
             if len(past_df) < 30: yf_diag["yf_fail"] += 1; continue
+            
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
             if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0:
                 yf_diag["yf_fail"] += 1; continue
+
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
                 lim = infer_daily_limit(pp, cp)
                 if cp >= (lim - tw_tick(lim)): past_boards += 1
                 else: break
+
             if use_bloodline and (not is_test) and past_boards < 1:
                 stats["非連板標的"].append(f"{c} {name}"); continue
+
             is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= (80000 if r["last"]<50 else 120000 if r["last"]<100 else 200000))
             vol_ratio = r["vol_sh"] / (vol_ma20_sh * frac + 1e-9)
             if vol_ratio < (0.5 if is_test else 1.3): stats["爆量不足"].append(f"{c} {name}"); continue
+            
             rng = r["high"] - r["low"]
             if (r["high"] - r["last"]) / max(1e-9, r["high"]) > pb_lim: stats["回落過大"].append(f"{c} {name}"); continue
             if (r["last"] - r["low"]) / max(1e-9, rng) < (0.5 if is_test else 0.80) and rng > 0.1: stats["收盤太弱"].append(f"{c} {name}"); continue
@@ -370,19 +375,19 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WARROOM ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">Quantitative Trading Terminal v7.0</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v7.1</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 嚴格連板血統", value=True)
 
-if st.button("🚀 INITIATE QUANTITATIVE SCAN"):
+if st.button("🚀 啟動全戰區量化掃描"):
     t0, diag = time.perf_counter(), diag_init()
-    with st.status("⚡ ESTABLISHING SECURE UPLINK...", expanded=True) as status:
+    with st.status("⚡ 建立安全連線與解析市場中...", expanded=True) as status:
         t = time.perf_counter(); meta = get_stock_list()
         diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
-        if len(meta) < 500: diag_err(diag, Exception(f"Meta 過少 ({len(meta)})"), "META_SUSPECT")
+        if len(meta) < 500: diag_err(diag, Exception(f"清單數量異常 ({len(meta)})"), "META_SUSPECT")
         
         t = time.perf_counter(); now_ts = now_taipei()
         pre_df, mis_err, mis_diag = fast_mis_scan(meta, status, now_ts, is_test, diag)
@@ -392,34 +397,35 @@ if st.button("🚀 INITIATE QUANTITATIVE SCAN"):
         final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag, use_bloodline)
         diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
         diag["total"] = time.perf_counter() - t0
-        status.update(label="✅ SCAN COMPLETE", state="complete")
+        status.update(label="✅ 掃描完成", state="complete")
     st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test, "use_bloodline": use_bloodline}
 
 scan = st.session_state.get("last_scan")
 if scan:
     d, res, sts, ts = scan["diag"], scan["res"], scan["stats"], scan["ts"]
     t_str = f"測試: {'ON' if scan['is_test'] else 'OFF'} | 血統: {'ON' if scan['use_bloodline'] else 'OFF'}"
-    st.markdown(f'<div class="status-caption">LAST UPDATE: {ts.strftime("%H:%M:%S")} | {t_str} | LATENCY: {d["total"]:.2f}s</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="status-caption">上次更新：{ts.strftime("%H:%M:%S")} | {t_str} | 系統耗時：{d["total"]:.2f}s</div>', unsafe_allow_html=True)
     
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("INITIAL CANDIDATES", d.get("cand_total", 0))
-    m2.metric("QUALIFIED TARGETS", len(res))
+    m1.metric("初始候選標的", d.get("cand_total", 0))
+    m2.metric("嚴選錄取檔數", len(res))
     total_parse = d.get("mis_parse_ok", 0) + d.get("mis_parse_fail", 0)
-    m3.metric("DATA INTEGRITY", f"{(d.get('mis_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
-    m4.metric("SYSTEM FAULTS", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
+    m3.metric("資料解析良率", f"{(d.get('mis_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
+    m4.metric("系統異常阻擋", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
 
-    with st.expander("⚙️ SYSTEM DIAGNOSTICS & TELEMETRY", expanded=False):
+    with st.expander("⚙️ 系統診斷與底層監控", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("MARKET BREADTH", d.get("meta_count")); c2.metric("MIS PARSED", d.get("mis_parse_ok"))
-        c3.metric("YF COVERAGE", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
-        rescue_msg = f"{'🟢 ACTIVE' if d.get('yf_rescue_used', 0) else '⚪ STANDBY'} | ERR {d.get('other_err',0)}"
-        c4.metric("RESCUE PROTOCOL", rescue_msg)
+        c1.metric("全市場掃描", d.get("meta_count"))
+        c2.metric("MIS 有效解析", d.get("mis_parse_ok"))
+        c3.metric("YF 數據覆蓋", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
+        rescue_msg = f"{'🟢 啟動' if d.get('yf_rescue_used', 0) else '⚪ 待命'} | ERR {d.get('other_err',0)}"
+        c4.metric("救援協議 / 錯誤", rescue_msg)
         if d.get('yf_rescue_used', 0):
-            st.caption(f"⚠️ Cell Division Rescue: {d.get('yf_parts_ok', 0)} OK / {d.get('yf_parts_fail', 0)} FAIL")
-        st.caption(f"Latency Dist: Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
+            st.caption(f"⚠️ 細胞分裂救援：成功 {d.get('yf_parts_ok', 0)} 塊 / 失敗 {d.get('yf_parts_fail', 0)} 塊")
+        st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
         if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
 
-    with st.expander("🎯 CASUALTY REPORT (FILTERED TARGETS)", expanded=True):
+    with st.expander("🎯 戰損與淘汰名單 (實名點名)", expanded=True):
         for reason, stocks in sts.items():
             if isinstance(stocks, list) and stocks:
                 st.markdown(f"**{reason}**")
@@ -441,6 +447,6 @@ if scan:
                 </div>""", unsafe_allow_html=True)
     else: 
         if d.get("mis_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (SSL/網路被阻擋)，請確認執行環境的網路權限。")
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)，請確認執行環境。")
         else:
-            st.warning("⚠️ 目前無標的通過嚴格濾網。")
+            st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
