@@ -1402,3 +1402,159 @@ if run_scan:
             render_pretty_table(result)
 
 st.caption("註：未接券商五檔/封單時，『鎖死』用價格型態近似（tick/回落/收高/開板次數/最後N根貼板）。回測請按右側「更新回測結果」。")
+
+def _sf(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+def scan_sector_resonance_radar(
+    bars_today: dict,
+    base_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    now_ts: datetime,
+    *,
+    heat_threshold: float = 65.0,     # 熱度門檻（越高越嚴格）
+    near_ticks: int = 2,              # 距離漲停幾個 tick 內算「貼板」
+    top_sectors: int = 10,
+    top_members: int = 12,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    回傳：
+      1) sector_rank_df：族群共振排行榜
+      2) sector_members：dict[族群] -> DataFrame(該族群Top成員)
+    """
+    if not bars_today or base_df is None or base_df.empty:
+        return pd.DataFrame(), {}
+
+    # base index
+    base = base_df
+    if "code" in base.columns:
+        base = base.set_index("code", drop=False)
+
+    # meta maps
+    meta = meta_df.copy()
+    meta["industry"] = meta["industry"].fillna("").replace("", "未分類")
+    code_to_name = dict(zip(meta["code"], meta["name"]))
+    code_to_ind = dict(zip(meta["code"], meta["industry"]))
+
+    # time progress (for rough expected volume; radar要快，不做profile)
+    bar_n = bars_expected_5m(now_ts)
+    frac_lin = max(0.2, bar_n / 54.0)
+
+    rows = []
+    for code, df5m in bars_today.items():
+        if code not in base.index:
+            continue
+
+        b = base.loc[code]
+        yday_close = b.get("yday_close", None)
+        if pd.isna(yday_close):
+            continue
+        yday_close = float(yday_close)
+
+        limit_pct = b.get("limit_class_pct", 0.10)
+        try:
+            limit_pct = float(limit_pct)
+        except Exception:
+            limit_pct = 0.10
+
+        limit_up = calc_limit_up(yday_close, limit_pct)
+        tick = tw_tick(limit_up)
+
+        last = _sf(df5m["Close"].iloc[-1])
+        day_high = _sf(df5m["High"].max())
+        day_low = _sf(df5m["Low"].min())
+        vol_shares = _sf(df5m["Volume"].sum())
+        vol_lots = int(vol_shares / 1000)
+
+        # 貼板/距離
+        dist_to_limit_pct = (limit_up - last) / max(1e-9, limit_up) * 100.0
+        near_limit = last >= (limit_up - near_ticks * tick)
+
+        # 收高與回落（鎖板品質）
+        rng = max(1e-9, day_high - day_low)
+        close_pos = (last - day_low) / rng
+        pullback = (day_high - last) / max(1e-9, day_high)  # 0~1
+
+        # 爆量（快速版）
+        vol_ma20 = _sf(b.get("vol_ma20_shares", 0.0))
+        exp_vol = vol_ma20 * frac_lin if vol_ma20 > 0 else 0.0
+        vol_ratio = (vol_shares / (exp_vol + 1e-9)) if exp_vol > 0 else 0.0
+
+        # 漲幅
+        chg_pct = (last / yday_close - 1.0) * 100.0
+
+        # 熱度分 0~100（族群雷達用：抓“集體升溫”）
+        heat = 0.0
+        # 越接近漲停越高（貼板直接加滿）
+        heat += 35.0 if near_limit else max(0.0, 35.0 * (1.0 - dist_to_limit_pct / 5.0))  # 5%內有分
+        # 漲幅靠近漲停
+        heat += 20.0 * min(1.0, max(0.0, chg_pct / (limit_pct * 100.0)))
+        # 爆量品質
+        heat += 20.0 * min(1.0, max(0.0, (vol_ratio - 1.0) / 2.5))
+        # 收在高檔
+        heat += 15.0 * min(1.0, max(0.0, (close_pos - 0.55) / 0.45))
+        # 回落懲罰（>1%回落扣爆）
+        heat -= 20.0 * min(1.0, max(0.0, pullback / 0.01))
+
+        heat = float(max(0.0, min(100.0, heat)))
+
+        industry = code_to_ind.get(code, "未分類") or "未分類"
+
+        rows.append({
+            "代號": code,
+            "名稱": code_to_name.get(code, ""),
+            "族群": industry,
+            "熱度分": heat,
+            "貼板": bool(near_limit),
+            "距離漲停(%)": float(dist_to_limit_pct),
+            "較昨收(%)": float(chg_pct),
+            "盤中爆量倍數(快)": float(vol_ratio),
+            "累積量(張)": int(vol_lots),
+            "收在高檔(0-1)": float(close_pos),
+            "回落(%)": float(pullback * 100.0),
+        })
+
+    if not rows:
+        return pd.DataFrame(), {}
+
+    stock_df = pd.DataFrame(rows)
+    stock_df["族群"] = stock_df["族群"].fillna("未分類")
+    stock_df["熱"] = stock_df["熱度分"] >= float(heat_threshold)
+
+    # 族群共振分數：熱檔數 + 貼板數 + 平均熱度 + 最高熱度（你要的“共振”）
+    g = stock_df.groupby("族群", dropna=False)
+    sector = g.agg(
+        掃描檔數=("代號", "count"),
+        熱檔數=("熱", "sum"),
+        貼板數=("貼板", "sum"),
+        平均熱度=("熱度分", "mean"),
+        最高熱度=("熱度分", "max"),
+        平均爆量=("盤中爆量倍數(快)", "mean"),
+    ).reset_index().rename(columns={"族群": "族群名稱"})
+
+    # 共振分（0~100 近似）：熱檔+貼板權重最大
+    sector["共振分"] = (
+        sector["熱檔數"] * 18.0 +
+        sector["貼板數"] * 10.0 +
+        sector["平均熱度"] * 0.35 +
+        sector["最高熱度"] * 0.25 +
+        sector["平均爆量"] * 2.0
+    )
+    # normalization (clip)
+    sector["共振分"] = sector["共振分"].clip(0, 100)
+
+    sector = sector.sort_values(["共振分", "熱檔數", "貼板數", "最高熱度"], ascending=False).head(int(top_sectors))
+    sector.insert(0, "排名", range(1, len(sector) + 1))
+
+    # 各族群 top 成員
+    sector_members = {}
+    for sec in sector["族群名稱"].tolist():
+        sub = stock_df[stock_df["族群"] == sec].copy()
+        sub = sub.sort_values(["熱度分", "貼板", "距離漲停(%)"], ascending=[False, False, True]).head(int(top_members))
+        sub.insert(0, "排名", range(1, len(sub) + 1))
+        sector_members[sec] = sub
+
+    return sector, sector_members
