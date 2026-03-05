@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 5.9｜資料結構絕對防護｜容錯極限版｜Apple Pro
+# app.py — 起漲戰情室｜戰神 6.0 究極無漏版｜資料欄位純化｜NaN 防禦｜Apple Pro 旗艦
 import io
 import math
 import time
@@ -41,24 +41,25 @@ def make_retry_session():
 @st.cache_data(ttl=6*3600, show_spinner=False)
 def yf_download_daily(syms):
     if not syms: return None
-    df = yf.download(
-        tickers=" ".join(syms), period="120d", interval="1d", 
-        group_by="ticker", auto_adjust=False, threads=True, progress=False
-    )
+    df = yf.download(tickers=" ".join(syms), period="120d", interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
+    
     if df is None or getattr(df, "empty", False):
         return df
 
-    # ✅ ✅ ✅ 修正 1：強制統一成 MultiIndex，避免單 ticker 結構崩壞
     if not isinstance(df.columns, pd.MultiIndex):
         t = syms[0]
         df.columns = pd.MultiIndex.from_product([[t], df.columns])
+
+    # ✅ ✅ ✅ 修正 3：原生下載層即進行 Index 去重與排序，確保時序函數 (rolling/iloc) 絕對安全
+    df = df[~df.index.duplicated(keep="last")]
+    df = df.sort_index()
         
     return df
 
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="WarRoom Pro 5.9", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro 6.0", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
@@ -81,14 +82,11 @@ st.markdown("""
 # =========================
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 
-# ✅ ✅ ✅ 修正 3：更保守的時區降級防護
 def idx_date_taipei(idx):
     try:
         if getattr(idx, "tz", None) is not None:
-            try:
-                return idx.tz_convert("Asia/Taipei").date
-            except:
-                return idx.tz_localize(None).date # 暴力退回無時區
+            try: return idx.tz_convert("Asia/Taipei").date
+            except: return idx.tz_localize(None).date
     except: pass
     return idx.date
 
@@ -129,10 +127,7 @@ def get_stock_list():
             r = session.get(url, timeout=15); r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
-            c_col = col_map.get('code') or df.columns[1]
-            n_col = col_map.get('name') or df.columns[2]
-            t_col = col_map.get('type') 
-            
+            c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
             for _, row in df.iterrows():
                 stype = str(row.get(t_col, "")) if t_col else ""
                 if t_col and ("權證" in stype or "ETF" in stype): continue
@@ -218,9 +213,11 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         frames = [f for f in frames if f is not None and not getattr(f, "empty", False)]
         if frames: 
             raw_daily = pd.concat(frames, axis=1)
-            # ✅ ✅ ✅ 修正 2：Concat 後強制去重欄位
             if isinstance(raw_daily.columns, pd.MultiIndex):
                 raw_daily = raw_daily.loc[:, ~raw_daily.columns.duplicated()]
+            # ✅ ✅ ✅ 修正 3：救援 concat 後去重 index + sort，防止 rolling 崩潰
+            raw_daily = raw_daily[~raw_daily.index.duplicated(keep="last")]
+            raw_daily = raw_daily.sort_index()
 
     diag["t_yf"] = time.perf_counter() - t_yf_start
     if raw_daily is None or getattr(raw_daily, "empty", False):
@@ -239,8 +236,10 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             if isinstance(raw_daily.columns, pd.MultiIndex):
                 if sym not in raw_daily.columns.get_level_values(0):
                     yf_diag["yf_fail"] += 1; continue
-                dfD = raw_daily[sym].dropna()
-            else: dfD = raw_daily.dropna()
+                # ✅ ✅ ✅ 修正 1：只取 Close, Volume，避免其他欄位 NaN 誤殺有效資料
+                dfD = raw_daily[sym][["Close", "Volume"]].dropna()
+            else: 
+                dfD = raw_daily[["Close", "Volume"]].dropna()
                 
             if len(dfD) < 30: yf_diag["yf_fail"] += 1; continue
             
@@ -249,6 +248,11 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             if len(past_df) < 30: yf_diag["yf_fail"] += 1; continue
             
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
+            
+            # ✅ ✅ ✅ 修正 2：攔截 NaN 黑洞與 0 基準防護
+            if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0:
+                yf_diag["yf_fail"] += 1; continue
+
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
@@ -278,12 +282,12 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 5.9</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">WarRoom Pro 6.0</div>', unsafe_allow_html=True)
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 血統證明", value=True)
 
-if st.button("🚀 啟動全市場秒級偵測"):
+if st.button("🚀 啟動工業級掃描"):
     t0, diag = time.perf_counter(), diag_init()
     with st.status("⚡ 核心運作中...", expanded=True) as status:
         t = time.perf_counter(); meta = get_stock_list()
