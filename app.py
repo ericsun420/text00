@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 7.2 終極破壁版｜語法修復｜全中文專業介面｜Ultra Pro
+# app.py — 起漲戰情室｜戰神 7.3 終極破壁版｜陣列完美對齊｜細胞分裂無漏版｜Ultra Pro
 import io
 import math
 import time
@@ -212,7 +212,6 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
             c = q.get("c")
             if not c or c not in meta_dict: continue 
             try:
-                # ✅ 修復了這裡的語法錯誤
                 z, u, v, y = q.get("z"), q.get("u"), q.get("v"), q.get("y")
                 if z in (None, "", "-", "—") or u in (None, "", "-", "—") or y in (None, "", "-", "—", "0"):
                     mis_diag["mis_parse_fail"] += 1; continue
@@ -250,11 +249,15 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     t_yf_start = time.perf_counter()
     raw_daily = None
     
+    # ✅ 修正 1：陣列完美對齊，空塊也要佔位，維持 index 閉環
     def try_yf_parts(parts):
         res_frames = []
         for part in parts:
+            if not part:
+                res_frames.append(None)
+                continue
             try:
-                if part: res_frames.append(yf_download_daily(part))
+                res_frames.append(yf_download_daily(part))
             except Exception as e:
                 diag_err(diag, e, "YF_PART_FAIL")
                 res_frames.append(None)
@@ -284,11 +287,14 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             for i, f in enumerate(frames1):
                 if f is None or getattr(f, "empty", False):
                     p = parts1[i]
+                    # ✅ 修正 2：如果本身就是空陣列，就不要再無意義切分
+                    if not p: continue 
                     if len(p) > 1:
                         m2 = len(p)//2
                         parts2.extend([p[:m2], p[m2:]])
                     else:
                         parts2.append(p)
+            
             if parts2:
                 frames2 = try_yf_parts(parts2)
                 diag["yf_parts_ok"] += sum(1 for f in frames2 if f is not None and not getattr(f, "empty", False))
@@ -377,7 +383,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # MAIN
 # =========================
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v7.2</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v7.3 完美版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
