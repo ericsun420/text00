@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 6.5 狀態閉環版｜極限裝甲｜Apple Pro 旗艦
+# app.py — 起漲戰情室｜戰神 6.6 主動免疫版｜空殼攔截｜毒塊追蹤｜Apple Pro
 import io
 import math
 import time
@@ -24,6 +24,7 @@ def diag_init():
         "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0,
         "yf_symbols": 0, "yf_returned": 0, "yf_fail": 0, "other_err": 0,
         "yf_bulk_fail": 0, "yf_rescue_used": 0,
+        "yf_parts_ok": 0, "yf_parts_fail": 0, # ✅ 新增：毒塊比例追蹤
         "last_errors": deque(maxlen=5),
         "t_meta": 0.0, "t_mis": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0
     }
@@ -57,7 +58,7 @@ def yf_download_daily(syms):
 # =========================
 # UI / THEME
 # =========================
-st.set_page_config(page_title="WarRoom Pro 6.5", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Pro 6.6", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
@@ -213,7 +214,9 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 
     try:
         raw_daily = yf_download_daily(syms)
-        # ✅ 修正 1：顯式歸零，保證狀態自洽
+        # ✅ ✅ ✅ 修正 1：如果回傳空殼，直接視為失敗並觸發救援
+        if raw_daily is None or getattr(raw_daily, "empty", False):
+            raise Exception("YF_BULK_EMPTY")
         diag["yf_rescue_used"] = 0 
     except Exception as e:
         diag_err(diag, e, "YF_BULK_FAIL")
@@ -223,6 +226,11 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         mid = max(1, len(syms)//2)
         parts1 = [syms[:mid], syms[mid:]]
         frames1 = try_yf_parts(parts1)
+        
+        # ✅ ✅ ✅ 修正 3：追蹤第一階細胞分裂的成功率
+        diag["yf_parts_ok"] = diag.get("yf_parts_ok", 0) + sum(1 for f in frames1 if f is not None and not getattr(f, "empty", False))
+        diag["yf_parts_fail"] = diag.get("yf_parts_fail", 0) + sum(1 for f in frames1 if f is None or getattr(f, "empty", False))
+        
         frames_ok = [f for f in frames1 if f is not None and not getattr(f, "empty", False)]
         
         if len(frames_ok) == 0:
@@ -234,12 +242,16 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                 else:
                     parts2.append(p)
             frames2 = try_yf_parts(parts2)
+            
+            # ✅ 追蹤第二階分裂成功率
+            diag["yf_parts_ok"] += sum(1 for f in frames2 if f is not None and not getattr(f, "empty", False))
+            diag["yf_parts_fail"] += sum(1 for f in frames2 if f is None or getattr(f, "empty", False))
+            
             frames_ok = [f for f in frames2 if f is not None and not getattr(f, "empty", False)]
 
         if frames_ok: 
             raw_daily = pd.concat(frames_ok, axis=1)
             
-            # ✅ 修正 2：終極保險絲，捕捉動態 Ticker 確保 MultiIndex 結構
             if raw_daily is not None and not isinstance(raw_daily.columns, pd.MultiIndex):
                 fallback_t = syms[0]
                 try:
@@ -259,6 +271,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     if raw_daily is None or getattr(raw_daily, "empty", False):
         yf_diag["other_err"] += 1; return pd.DataFrame(), stats, yf_diag
 
+    # ✅ 修正 2：確保無論 Bulk 成功還是救援成功，都能精準統計 Coverage
     if isinstance(raw_daily.columns, pd.MultiIndex):
         diag["yf_returned"] = int(raw_daily.columns.get_level_values(0).nunique())
     else:
@@ -323,7 +336,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 6.5</div>', unsafe_allow_html=True)
+st.markdown('<div class="title">WarRoom Pro 6.6</div>', unsafe_allow_html=True)
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 血統證明", value=True)
@@ -361,8 +374,13 @@ if scan:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("全市場", d.get("meta_count")); c2.metric("MIS 有效", d.get("mis_parse_ok"))
         c3.metric("YF 回來/請求", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
-        c4.metric("救援 / 未知錯誤", f"{'🟢 ON' if d.get('yf_rescue_used', 0) else '⚪ OFF'} | ERR {d.get('other_err',0)}")
         
+        # ✅ 更新：把毒塊比例隱藏在救援狀態的附註裡，方便 Debug
+        rescue_msg = f"{'🟢 ON' if d.get('yf_rescue_used', 0) else '⚪ OFF'} | ERR {d.get('other_err',0)}"
+        c4.metric("救援 / 未知錯誤", rescue_msg)
+        if d.get('yf_rescue_used', 0):
+            st.caption(f"⚠️ 救援碎片狀態：成功 {d.get('yf_parts_ok', 0)} 塊 / 失敗 {d.get('yf_parts_fail', 0)} 塊")
+
         st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
         if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
 
