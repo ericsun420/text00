@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 6.7 智能急救版｜空殼分流｜精準細胞分裂｜Apple Pro
+# app.py — 起漲戰情室｜戰神 7.0 終極破壁版｜SSL 強制通行｜Ultra Pro 奢華介面
 import io
 import math
 import time
@@ -13,6 +13,7 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
+# 隱藏 SSL 警告，保持版面乾淨
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
@@ -44,35 +45,81 @@ def make_retry_session():
 def yf_download_daily(syms):
     if not syms: return None
     df = yf.download(tickers=" ".join(syms), period="120d", interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
-    
     if df is None or getattr(df, "empty", False): return df
-
     if not isinstance(df.columns, pd.MultiIndex):
         t = syms[0]
         df.columns = pd.MultiIndex.from_product([[t], df.columns])
-
     df = df[~df.index.duplicated(keep="last")]
     df = df.sort_index()
     return df
 
 # =========================
-# UI / THEME
+# UI / THEME (Ultra Pro Design)
 # =========================
-st.set_page_config(page_title="WarRoom Pro 6.7", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="WarRoom Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
-    [data-testid="stAppViewContainer"] { background: radial-gradient(circle at top right, #1c1c1e, #000000) !important; color: #f5f5f7 !important; }
-    .block-container { padding-top: 2rem; max-width: 1200px; }
+    /* 深邃宇宙黑背景 */
+    [data-testid="stAppViewContainer"], .main { 
+        background: #050505 !important; 
+        background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important;
+        color: #e2e8f0 !important; 
+    }
+    .block-container { padding-top: 2rem; max-width: 1280px; }
     [data-testid="stSidebar"] { display: none !important; }
-    .title { font-size: 52px; font-weight: 800; background: linear-gradient(180deg, #ffffff, #a1a1a6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; }
-    .pro-card { background: rgba(28, 28, 30, 0.7); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 24px; margin-bottom: 16px; transition: 0.3s ease; }
-    .pro-card:hover { border: 1px solid rgba(0, 122, 255, 0.4); transform: translateY(-3px); }
-    .stock-name { font-size: 20px; font-weight: 700; color: #ffffff; }
-    .price-large { font-size: 32px; font-weight: 700; color: #ffffff; font-variant-numeric: tabular-nums; }
-    .tag-pro { padding: 4px 12px; border-radius: 8px; font-size: 11px; font-weight: 700; background: rgba(0, 122, 255, 0.15); color: #0a84ff; border: 1px solid rgba(0, 122, 255, 0.3); }
-    .fail-tag { display: inline-block; padding: 4px 10px; background: rgba(255, 69, 58, 0.08); color: #ff453a; border-radius: 6px; margin: 3px; font-size: 11px; border: 1px solid rgba(255, 69, 58, 0.15); }
-    .stButton>button { border-radius: 14px !important; background: #ffffff !important; color: #000000 !important; font-weight: 700; padding: 18px !important; width: 100% !important; border: none; }
-    .status-caption { color: #86868b; font-size: 12px; text-align: center; margin-top: 5px; }
+    
+    /* 頂部標題 */
+    .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
+    .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px; text-transform: uppercase;}
+    
+    /* 奢華流光卡片 */
+    .pro-card { 
+        background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); 
+        backdrop-filter: blur(24px); 
+        border: 1px solid rgba(255, 255, 255, 0.05); 
+        border-top: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 20px; 
+        padding: 24px; 
+        margin-bottom: 16px; 
+        transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+        box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5);
+    }
+    .pro-card:hover { 
+        border-color: rgba(56, 189, 248, 0.4); 
+        transform: translateY(-5px) scale(1.01); 
+        box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15);
+    }
+    
+    /* 卡片內文字 */
+    .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
+    .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
+    .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px; text-transform: uppercase;}
+    .fail-tag { display: inline-block; padding: 6px 12px; background: rgba(244, 63, 94, 0.05); color: #f43f5e; border-radius: 8px; margin: 4px; font-size: 12px; border: 1px solid rgba(244, 63, 94, 0.15); font-weight: 600;}
+    
+    /* 頂級按鈕 */
+    .stButton>button { 
+        border-radius: 16px !important; 
+        background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%) !important; 
+        color: #0f172a !important; 
+        font-weight: 900 !important; 
+        padding: 20px !important; 
+        width: 100% !important; 
+        border: none !important;
+        font-size: 18px !important;
+        letter-spacing: 2px !important;
+        box-shadow: 0 4px 15px rgba(255,255,255,0.1) !important;
+        transition: all 0.3s ease !important;
+    }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.2) !important; }
+    
+    /* 美化 Streamlit 預設 Metric */
+    [data-testid="stMetric"] { background: rgba(20,20,20,0.6); padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.03); }
+    [data-testid="stMetricValue"] { font-size: 32px !important; font-weight: 900 !important; color: #f1f5f9 !important; }
+    [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; text-transform: uppercase; letter-spacing: 1px; }
+    
+    /* Expander 美化 */
+    [data-testid="stExpander"] { background: transparent !important; border: 1px solid rgba(255,255,255,0.05) !important; border-radius: 16px !important; }
+    [data-testid="stExpander"] summary { background: rgba(20,20,20,0.4) !important; border-radius: 16px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -123,7 +170,8 @@ def get_stock_list():
             ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
     for ex, url in urls:
         try:
-            r = session.get(url, timeout=15); r.raise_for_status()
+            # ✅ 強制略過 SSL 驗證 (解決 SSLError)
+            r = session.get(url, timeout=15, verify=False); r.raise_for_status()
             df = pd.read_csv(io.StringIO(r.text.replace("\r", "")), dtype=str, engine="python", on_bad_lines="skip")
             col_map = {c.strip().lower(): c for c in df.columns}
             c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
@@ -140,7 +188,8 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     session, rows, err_mis = make_retry_session(), [], 0
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=headers, timeout=10)
+    # ✅ 強制略過 SSL 驗證 (解決 SSLError 阻擋整個流程)
+    try: session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", headers=headers, timeout=10, verify=False)
     except Exception as e: diag_err(diag, e, "MIS_WARMUP")
 
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
@@ -153,9 +202,10 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         chunk = codes[i:i+80]
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
-        status_placeholder.update(label=f"📡 雷達掃描中... ({i}/{len(codes)})", state="running")
+        status_placeholder.update(label=f"📡 穿透雷達掃描中... ({i}/{len(codes)})", state="running")
         try:
-            r = session.get(url, headers=headers, timeout=12)
+            # ✅ 強制略過 SSL 驗證
+            r = session.get(url, headers=headers, timeout=12, verify=False)
             data = r.json().get("msgArray", [])
         except:
             err_mis += 1; mis_diag["mis_req_err"] += 1; time.sleep(0.1); continue
@@ -218,7 +268,6 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             raise Exception("YF_BULK_EMPTY")
         diag["yf_rescue_used"] = 0 
     except Exception as e:
-        # ✅ 修正 1：精準分流錯誤標籤
         tag = "YF_BULK_EMPTY" if str(e) == "YF_BULK_EMPTY" else "YF_BULK_FAIL"
         diag_err(diag, e, tag)
         diag["yf_bulk_fail"] = diag.get("yf_bulk_fail", 0) + 1
@@ -230,10 +279,8 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         
         diag["yf_parts_ok"] = diag.get("yf_parts_ok", 0) + sum(1 for f in frames1 if f is not None and not getattr(f, "empty", False))
         diag["yf_parts_fail"] = diag.get("yf_parts_fail", 0) + sum(1 for f in frames1 if f is None or getattr(f, "empty", False))
-        
         frames_ok = [f for f in frames1 if f is not None and not getattr(f, "empty", False)]
         
-        # ✅ 修正 2：精準補刀！只要有任何一塊失敗 (<2)，就只針對失敗的塊進行二階分裂
         if len(frames_ok) < 2:
             parts2 = []
             for i, f in enumerate(frames1):
@@ -244,27 +291,22 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                         parts2.extend([p[:m2], p[m2:]])
                     else:
                         parts2.append(p)
-            
             if parts2:
                 frames2 = try_yf_parts(parts2)
                 diag["yf_parts_ok"] += sum(1 for f in frames2 if f is not None and not getattr(f, "empty", False))
                 diag["yf_parts_fail"] += sum(1 for f in frames2 if f is None or getattr(f, "empty", False))
-                # 無縫接合二階成功的碎片
                 frames_ok.extend([f for f in frames2 if f is not None and not getattr(f, "empty", False)])
 
         if frames_ok: 
             raw_daily = pd.concat(frames_ok, axis=1)
-            
             if raw_daily is not None and not isinstance(raw_daily.columns, pd.MultiIndex):
                 fallback_t = syms[0]
                 try:
                     for f in frames_ok:
                         if f is not None and isinstance(getattr(f, "columns", None), pd.MultiIndex):
-                            fallback_t = f.columns.get_level_values(0)[0]
-                            break
+                            fallback_t = f.columns.get_level_values(0)[0]; break
                 except: pass
                 raw_daily.columns = pd.MultiIndex.from_product([[fallback_t], raw_daily.columns])
-                
             if isinstance(raw_daily.columns, pd.MultiIndex):
                 raw_daily = raw_daily.loc[:, ~raw_daily.columns.duplicated()]
             raw_daily = raw_daily[~raw_daily.index.duplicated(keep="last")]
@@ -274,10 +316,8 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     if raw_daily is None or getattr(raw_daily, "empty", False):
         yf_diag["other_err"] += 1; return pd.DataFrame(), stats, yf_diag
 
-    if isinstance(raw_daily.columns, pd.MultiIndex):
-        diag["yf_returned"] = int(raw_daily.columns.get_level_values(0).nunique())
-    else:
-        diag["yf_returned"] = 1
+    if isinstance(raw_daily.columns, pd.MultiIndex): diag["yf_returned"] = int(raw_daily.columns.get_level_values(0).nunique())
+    else: diag["yf_returned"] = 1
 
     results, today_date = [], now_ts.date()
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
@@ -294,35 +334,27 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                     yf_diag["yf_fail"] += 1; continue
                 df_sym = raw_daily[sym]
             else: df_sym = raw_daily
-            
             if not {"Close", "Volume"}.issubset(set(df_sym.columns)):
                 yf_diag["yf_fail"] += 1; continue
-                
             dfD = df_sym[["Close", "Volume"]].dropna()
             if len(dfD) < 30: yf_diag["yf_fail"] += 1; continue
-            
             dates_tw = idx_date_taipei(dfD.index)
             past_df = dfD[dates_tw < today_date].copy()
             if len(past_df) < 30: yf_diag["yf_fail"] += 1; continue
-            
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
             if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0:
                 yf_diag["yf_fail"] += 1; continue
-
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
                 lim = infer_daily_limit(pp, cp)
                 if cp >= (lim - tw_tick(lim)): past_boards += 1
                 else: break
-
             if use_bloodline and (not is_test) and past_boards < 1:
                 stats["非連板標的"].append(f"{c} {name}"); continue
-
             is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= (80000 if r["last"]<50 else 120000 if r["last"]<100 else 200000))
             vol_ratio = r["vol_sh"] / (vol_ma20_sh * frac + 1e-9)
             if vol_ratio < (0.5 if is_test else 1.3): stats["爆量不足"].append(f"{c} {name}"); continue
-            
             rng = r["high"] - r["low"]
             if (r["high"] - r["last"]) / max(1e-9, r["high"]) > pb_lim: stats["回落過大"].append(f"{c} {name}"); continue
             if (r["last"] - r["low"]) / max(1e-9, rng) < (0.5 if is_test else 0.80) and rng > 0.1: stats["收盤太弱"].append(f"{c} {name}"); continue
@@ -338,14 +370,16 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 # =========================
 # MAIN
 # =========================
-st.markdown('<div class="title">WarRoom Pro 6.7</div>', unsafe_allow_html=True)
-col_cfg = st.columns([1.2, 1.2, 1, 1])
-with col_cfg[0]: is_test = st.toggle("🔥 測試模式", value=False)
-with col_cfg[1]: use_bloodline = st.toggle("🛡️ 血統證明", value=True)
+st.markdown('<div class="title">WARROOM ULTRA</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">Quantitative Trading Terminal v7.0</div>', unsafe_allow_html=True)
 
-if st.button("🚀 啟動全戰區掃描"):
+col_cfg = st.columns([1.2, 1.2, 1, 1])
+with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
+with col_cfg[1]: use_bloodline = st.toggle("🛡️ 嚴格連板血統", value=True)
+
+if st.button("🚀 INITIATE QUANTITATIVE SCAN"):
     t0, diag = time.perf_counter(), diag_init()
-    with st.status("⚡ 核心運作中...", expanded=True) as status:
+    with st.status("⚡ ESTABLISHING SECURE UPLINK...", expanded=True) as status:
         t = time.perf_counter(); meta = get_stock_list()
         diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
         if len(meta) < 500: diag_err(diag, Exception(f"Meta 過少 ({len(meta)})"), "META_SUSPECT")
@@ -358,44 +392,55 @@ if st.button("🚀 啟動全戰區掃描"):
         final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag, use_bloodline)
         diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
         diag["total"] = time.perf_counter() - t0
-        status.update(label="✅ 分析完成", state="complete")
+        status.update(label="✅ SCAN COMPLETE", state="complete")
     st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test, "use_bloodline": use_bloodline}
 
 scan = st.session_state.get("last_scan")
 if scan:
     d, res, sts, ts = scan["diag"], scan["res"], scan["stats"], scan["ts"]
-    st.markdown(f'<div class="status-caption">上次更新：{ts.strftime("%H:%M:%S")} | 測試:{"ON" if scan["is_test"] else "OFF"} | 耗時：{d["total"]:.2f}s</div>', unsafe_allow_html=True)
+    t_str = f"測試: {'ON' if scan['is_test'] else 'OFF'} | 血統: {'ON' if scan['use_bloodline'] else 'OFF'}"
+    st.markdown(f'<div class="status-caption">LAST UPDATE: {ts.strftime("%H:%M:%S")} | {t_str} | LATENCY: {d["total"]:.2f}s</div>', unsafe_allow_html=True)
+    
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("初始候選", d.get("cand_total", 0))
-    m2.metric("錄取檔數", len(res))
+    m1.metric("INITIAL CANDIDATES", d.get("cand_total", 0))
+    m2.metric("QUALIFIED TARGETS", len(res))
     total_parse = d.get("mis_parse_ok", 0) + d.get("mis_parse_fail", 0)
-    m3.metric("資料品質", f"{(d.get('mis_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
-    m4.metric("系統異常", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
+    m3.metric("DATA INTEGRITY", f"{(d.get('mis_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
+    m4.metric("SYSTEM FAULTS", d.get("mis_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
 
-    with st.expander("🧪 系統診斷 (效能/資料源監控)", expanded=False):
+    with st.expander("⚙️ SYSTEM DIAGNOSTICS & TELEMETRY", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("全市場", d.get("meta_count")); c2.metric("MIS 有效", d.get("mis_parse_ok"))
-        c3.metric("YF 回來/請求", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
-        
-        rescue_msg = f"{'🟢 ON' if d.get('yf_rescue_used', 0) else '⚪ OFF'} | ERR {d.get('other_err',0)}"
-        c4.metric("救援 / 未知錯誤", rescue_msg)
+        c1.metric("MARKET BREADTH", d.get("meta_count")); c2.metric("MIS PARSED", d.get("mis_parse_ok"))
+        c3.metric("YF COVERAGE", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
+        rescue_msg = f"{'🟢 ACTIVE' if d.get('yf_rescue_used', 0) else '⚪ STANDBY'} | ERR {d.get('other_err',0)}"
+        c4.metric("RESCUE PROTOCOL", rescue_msg)
         if d.get('yf_rescue_used', 0):
-            st.caption(f"⚠️ 救援碎片：成功 {d.get('yf_parts_ok', 0)} 塊 / 失敗 {d.get('yf_parts_fail', 0)} 塊")
-
-        st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
+            st.caption(f"⚠️ Cell Division Rescue: {d.get('yf_parts_ok', 0)} OK / {d.get('yf_parts_fail', 0)} FAIL")
+        st.caption(f"Latency Dist: Meta {d['t_meta']:.2f}s | MIS {d['t_mis']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
         if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
 
-    with st.expander("🔍 淘汰數據分析 (實名名單)", expanded=True):
+    with st.expander("🎯 CASUALTY REPORT (FILTERED TARGETS)", expanded=True):
         for reason, stocks in sts.items():
             if isinstance(stocks, list) and stocks:
                 st.markdown(f"**{reason}**")
                 st.markdown(f'<div>' + "".join([f'<span class="fail-tag">{s}</span>' for s in stocks]) + '</div>', unsafe_allow_html=True)
 
     if not res.empty:
+        st.markdown("<br>", unsafe_allow_html=True)
         cols = st.columns(4)
         for i, r in res.iterrows():
             with cols[i % 4]:
-                st.markdown(f"""<div class="pro-card"><div class="tag-pro">{r['階段']}</div><div class="stock-name">{r['名稱']}</div>
-                    <div style="height:15px;"></div><div class="price-large">{r['現價']:.2f}</div>
-                    <div style="font-size:12px; color:#86868b; margin-top:10px;">{r['狀態']} | 爆量 {r['爆量']:.1f}x</div></div>""", unsafe_allow_html=True)
-    else: st.warning("目前無標的存活。")
+                st.markdown(f"""<div class="pro-card">
+                    <div class="tag-pro">{r['階段']}</div>
+                    <div class="stock-name">{r['代號']} {r['名稱']}</div>
+                    <div style="height:12px;"></div>
+                    <div class="price-large">{r['現價']:.2f}</div>
+                    <div style="font-size:13px; color:#94a3b8; margin-top:12px; font-weight:600;">
+                        {r['狀態']} | 動能 {r['爆量']:.1f}x
+                    </div>
+                </div>""", unsafe_allow_html=True)
+    else: 
+        if d.get("mis_parse_ok", 0) == 0:
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (SSL/網路被阻擋)，請確認執行環境的網路權限。")
+        else:
+            st.warning("⚠️ 目前無標的通過嚴格濾網。")
