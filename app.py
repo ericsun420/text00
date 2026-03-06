@@ -1180,7 +1180,7 @@ with st.container():
     with cfg2:
         use_bloodline = st.toggle("🛡️ 連板血統濾網", value=True, help="要求歷史連板血統，減少雜訊股。")
     with cfg3:
-        only_tse = st.toggle("🏛️ 只看上市", value=False, help="只顯示上市股票。")
+        only_tse = False
     min_board = DEFAULT_MIN_BOARD
     hold_days = DEFAULT_HOLD_DAYS
     st.markdown('</div>', unsafe_allow_html=True)
@@ -1308,7 +1308,7 @@ if "raw_data_vault_v12" in st.session_state:
     final_diag["t_backtest"] = time.perf_counter() - bt_t0
 
     ts = vault["ts"]
-    state_str = f"測試 {'ON' if is_test else 'OFF'} ｜ 血統 {'ON' if use_bloodline else 'OFF'} ｜ 上市限定 {'ON' if only_tse else 'OFF'}"
+    state_str = f"測試 {'ON' if is_test else 'OFF'} ｜ 血統 {'ON' if use_bloodline else 'OFF'}"
     st.markdown(
         f"<div class='soft-note'>資料時間：{ts.strftime('%Y-%m-%d %H:%M:%S')}（Asia/Taipei）｜{state_str}｜濾網瞬切：{final_diag['t_filter']:.3f}s</div>",
         unsafe_allow_html=True,
