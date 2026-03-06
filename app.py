@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 v10.0 機構級直通版｜富果 API 合法授權｜完美資料對齊
+# app.py — 起漲戰情室｜戰神 v10.1 機構級直通版｜無底線測試模式
 import io
 import math
 import time
@@ -19,7 +19,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # =========================
 # FUGLE API CONFIGURATION
 # =========================
-# ✅ 你的富果專屬授權金鑰
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 5.0)
 
@@ -51,7 +50,6 @@ def get_base_headers():
 
 def make_retry_session(base_headers=None):
     s = requests.Session()
-    # 針對 API 請求，遇到 429 (Rate Limit) 才重試
     retry = Retry(total=2, backoff_factor=1.0, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",))
     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
     s.mount("https://", adapter)
@@ -93,7 +91,6 @@ def fetch_top_volume_tickers(diag):
             seen.add(t)
             final_tks.append(t)
 
-    # ✅ 嚴格限制取前 50 名，完美保護富果免費版 60次/分鐘 的額度限制
     return final_tks[:50]
 
 # =========================
@@ -153,11 +150,6 @@ def calc_limit_up(prev_close, limit_pct=0.10):
     tick = tw_tick(raw)
     n = math.floor((raw + 1e-12) / tick)
     return round(n * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
-def infer_daily_limit(pp, cp):
-    l10 = calc_limit_up(pp, 0.10); l20 = calc_limit_up(pp, 0.20)
-    tol20 = max(tw_tick(l20), l20 * 0.0005) 
-    if abs(cp - l20) <= tol20 and abs(cp - l20) < abs(cp - l10): return l20
-    return l10
 
 # =========================
 # API ENGINE (Fugle VIP)
@@ -169,10 +161,10 @@ def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target
     
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
-    dist_limit = 5.0 if is_test else (3.1 if m <= 60 else 2.2 if m <= 180 else 1.5)
     
-    # 富果的量是「股 (Shares)」，所以門檻也要切換為股數
-    vol_limit = 200_000 if is_test else 800_000 
+    # ✅ 修改：測試模式下距離門檻設為 100% (代表什麼價格都收)，音量門檻設為 0
+    dist_limit = 100.0 if is_test else (3.1 if m <= 60 else 2.2 if m <= 180 else 1.5)
+    vol_limit = 0 if is_test else 800_000 
     
     for idx, c in enumerate(target_tickers):
         if c not in meta_dict: continue
@@ -195,8 +187,6 @@ def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target
             last = data.get("closePrice", ref_price)
             high = data.get("highPrice", last)
             low = data.get("lowPrice", last)
-            
-            # 富果 API v1.0 的 tradeVolume 單位為「股 (Shares)」
             vol_shares = data.get("total", {}).get("tradeVolume", 0)
             
             if ref_price <= 0 or last <= 0:
@@ -206,10 +196,9 @@ def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target
             upper = calc_limit_up(ref_price)
             dist_pct = max(0.0, ((upper - last) / upper) * 100)
             
-            # 解析五檔報價
             bids = data.get("bids", [])
             best_bid = bids[0].get("price", 0) if bids else 0.0
-            bid_sh1 = bids[0].get("size", 0) if bids else 0.0 # 股數
+            bid_sh1 = bids[0].get("size", 0) if bids else 0.0 
             
             diag["fugle_parse_ok"] += 1
             
@@ -224,7 +213,6 @@ def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target
             diag["fugle_req_err"] += 1
             diag_err(diag, e, "FUGLE_REQ_FAIL")
             
-        # 輕微延遲避免撞到 API 頻率限制
         time.sleep(0.1)
 
     df = pd.DataFrame(rows)
@@ -319,8 +307,10 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     results, today_date = [], now_ts.date()
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
-    frac = 0.5 if is_test else (0.12 if m <= 30 else 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0) if m <= 120 else min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0)))
-    pb_lim = 0.05 if is_test else (0.012 if m <= 90 else 0.0039)
+    
+    # ✅ 修改：測試模式下拔除動能濾網，讓所有股票都能印出來
+    frac = 0.0 if is_test else (0.12 if m <= 30 else 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0) if m <= 120 else min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0)))
+    pb_lim = 1.0 if is_test else (0.012 if m <= 90 else 0.0039)
 
     for _, r in candidates_df.iterrows():
         c, name = r["code"], meta_dict[r["code"]]["name"]
@@ -349,23 +339,21 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
                 cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
-                lim = infer_daily_limit(pp, cp)
+                lim = calc_limit_up(pp)
                 if cp >= (lim - tw_tick(lim)): past_boards += 1
                 else: break
 
             if use_bloodline and (not is_test) and past_boards < 1:
                 stats["非連板標的"].append(f"{c} {name}"); continue
 
-            # 買單門檻也對齊富果股數 (80000 股 = 80 張)
             is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= (80000 if r["last"]<50 else 120000 if r["last"]<100 else 200000))
-            
-            # 富果與 yfinance 皆為股數，比例計算 100% 精準！
             vol_ratio = r["vol_sh"] / (vol_ma20_sh * frac + 1e-9)
-            if vol_ratio < (0.5 if is_test else 1.3): stats["爆量不足"].append(f"{c} {name}"); continue
+            
+            if vol_ratio < (0.0 if is_test else 1.3): stats["爆量不足"].append(f"{c} {name}"); continue
             
             rng = r["high"] - r["low"]
             if (r["high"] - r["last"]) / max(1e-9, r["high"]) > pb_lim: stats["回落過大"].append(f"{c} {name}"); continue
-            if (r["last"] - r["low"]) / max(1e-9, rng) < (0.5 if is_test else 0.80) and rng > 0.1: stats["收盤太弱"].append(f"{c} {name}"); continue
+            if (r["last"] - r["low"]) / max(1e-9, rng) < (0.0 if is_test else 0.80) and rng > 0.1: stats["收盤太弱"].append(f"{c} {name}"); continue
 
             results.append({"代號": c, "名稱": name, "現價": r["last"], "爆量": vol_ratio, "狀態": "🔒 已鎖" if is_locked else "⚡ 發動", "階段": f"連續 {past_boards+1} 板", "board_val": past_boards})
         except Exception as e:
@@ -402,16 +390,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v10.0 機構級 API 直通版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v10.1 機構直通驗證版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
-with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
+with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式 (無底線顯示)", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 嚴格連板血統", value=True)
 
 now_time = time.time()
 last_run = st.session_state.get("last_run_ts", 0)
-
-# ✅ 配合富果免費版 60 次/分鐘 的限制，將冷卻保護延長至 60 秒
 cooldown_seconds = 60
 
 if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
@@ -436,11 +422,9 @@ if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
                 st.error("🚨 無法取得排行榜資料，請稍後再試。")
                 st.stop()
 
-            # 嚴格縮減名單
             filtered_meta = {k: v for k, v in meta.items() if k in top_tickers}
 
             t = time.perf_counter(); now_ts = now_taipei()
-            # ✅ 改由富果 API 直接處理
             pre_df = fast_fugle_scan(filtered_meta, status, now_ts, is_test, diag, top_tickers)
             diag["t_api"] = time.perf_counter() - t
             diag["cand_total"] = diag.get("fugle_rows", len(pre_df))
