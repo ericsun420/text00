@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 v10.1 機構級直通版｜無底線測試模式
+# app.py — 起漲戰情室｜戰神 v10.2 機構級瞬切版｜資料快取分離｜毫秒級切換濾網
 import io
 import math
 import time
@@ -152,19 +152,13 @@ def calc_limit_up(prev_close, limit_pct=0.10):
     return round(n * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
 
 # =========================
-# API ENGINE (Fugle VIP)
+# API ENGINE (RAW FETCH ONLY)
 # =========================
-def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target_tickers):
+# ✅ 修正 1：純粹抓取資料，不做任何條件過濾，把完整資料還原保留
+def fast_fugle_scan_raw(meta_dict, status_placeholder, diag, target_tickers):
     session = make_retry_session()
     headers = {"X-API-KEY": FUGLE_API_KEY}
     rows = []
-    
-    m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
-    m = max(0, min(270, m)) 
-    
-    # ✅ 修改：測試模式下距離門檻設為 100% (代表什麼價格都收)，音量門檻設為 0
-    dist_limit = 100.0 if is_test else (3.1 if m <= 60 else 2.2 if m <= 180 else 1.5)
-    vol_limit = 0 if is_test else 800_000 
     
     for idx, c in enumerate(target_tickers):
         if c not in meta_dict: continue
@@ -202,12 +196,12 @@ def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target
             
             diag["fugle_parse_ok"] += 1
             
-            if vol_shares >= vol_limit and dist_pct <= dist_limit:
-                rows.append({
-                    "code": c, "last": last, "upper": upper, "dist": dist_pct, 
-                    "vol_sh": vol_shares, "prev_close": ref_price,
-                    "high": high, "low": low, "best_bid": best_bid, "bid_sh1": bid_sh1
-                })
+            # 不管價格、量多少，全部存起來備用！
+            rows.append({
+                "code": c, "last": last, "upper": upper, "dist": dist_pct, 
+                "vol_sh": vol_shares, "prev_close": ref_price,
+                "high": high, "low": low, "best_bid": best_bid, "bid_sh1": bid_sh1
+            })
                 
         except Exception as e:
             diag["fugle_req_err"] += 1
@@ -221,15 +215,36 @@ def fast_fugle_scan(meta_dict, status_placeholder, now_ts, is_test, diag, target
     diag["fugle_rows"] = len(df)
     return df
 
-def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloodline):
+# =========================
+# DYNAMIC FILTER ENGINE
+# =========================
+# ✅ 修正 2：將過濾邏輯獨立出來，套用開關條件，實現毫秒級瞬切
+def apply_dynamic_filters(raw_df, meta_dict, now_ts, is_test, use_bloodline, base_diag):
+    diag = base_diag.copy() # 複製一份診斷數據，避免切換時數據重複疊加
     stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "非連板標的": []}
-    yf_diag = {"yf_symbols": 0, "yf_fail": 0, "other_err": 0}
-    if candidates_df.empty: return pd.DataFrame(), stats, yf_diag
     
-    candidates_df = candidates_df.sort_values(["dist", "vol_sh"], ascending=[True, False]).head(50)
+    # 初始化 YF 監控數據
+    diag["yf_symbols"] = 0; diag["yf_fail"] = 0; diag["other_err"] = 0
+    diag["yf_bulk_fail"] = 0; diag["yf_rescue_used"] = 0; diag["yf_returned"] = 0
+    diag["yf_parts_ok"] = 0; diag["yf_parts_fail"] = 0
+    
+    if raw_df.empty: return pd.DataFrame(), stats, diag
+
+    # 套用即時開關門檻
+    m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
+    m = max(0, min(270, m)) 
+    dist_limit = 100.0 if is_test else (3.1 if m <= 60 else 2.2 if m <= 180 else 1.5)
+    vol_limit = 0 if is_test else 800_000 
+    
+    # 執行第一階段瞬切過濾
+    candidates_df = raw_df[(raw_df['dist'] <= dist_limit) & (raw_df['vol_sh'] >= vol_limit)].copy()
+    candidates_df = candidates_df.head(50)
     stats["Total"] = len(candidates_df)
+    
+    if candidates_df.empty: return pd.DataFrame(), stats, diag
+
     syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
-    yf_diag["yf_symbols"] = len(syms)
+    diag["yf_symbols"] = len(syms)
     
     t_yf_start = time.perf_counter()
     raw_daily = None
@@ -237,20 +252,17 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     def try_yf_parts(parts):
         res_frames = []
         for part in parts:
-            if not part:
-                res_frames.append(None)
-                continue
-            try:
-                res_frames.append(yf_download_daily(part))
+            if not part: res_frames.append(None); continue
+            try: res_frames.append(yf_download_daily(part))
             except Exception as e:
                 diag_err(diag, e, "YF_PART_FAIL")
                 res_frames.append(None)
         return res_frames
 
+    # YF 資料因為有 st.cache_data 緩存，瞬切時不會重新下載，而是秒回傳！
     try:
         raw_daily = yf_download_daily(syms)
         if raw_daily is None or getattr(raw_daily, "empty", False): raise Exception("YF_BULK_EMPTY")
-        diag["yf_rescue_used"] = 0 
     except Exception as e:
         tag = "YF_BULK_EMPTY" if str(e) == "YF_BULK_EMPTY" else "YF_BULK_FAIL"
         diag_err(diag, e, tag)
@@ -274,8 +286,7 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                     if len(p) > 1:
                         m2 = len(p)//2
                         parts2.extend([p[:m2], p[m2:]])
-                    else:
-                        parts2.append(p)
+                    else: parts2.append(p)
             if parts2:
                 frames2 = try_yf_parts(parts2)
                 diag["yf_parts_ok"] += sum(1 for f in frames2 if f is not None and not getattr(f, "empty", False))
@@ -299,16 +310,13 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 
     diag["t_yf"] = time.perf_counter() - t_yf_start
     if raw_daily is None or getattr(raw_daily, "empty", False):
-        yf_diag["other_err"] += 1; return pd.DataFrame(), stats, yf_diag
+        diag["other_err"] += 1; return pd.DataFrame(), stats, diag
 
     if isinstance(raw_daily.columns, pd.MultiIndex): diag["yf_returned"] = int(raw_daily.columns.get_level_values(0).nunique())
     else: diag["yf_returned"] = 1
 
     results, today_date = [], now_ts.date()
-    m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
-    m = max(0, min(270, m)) 
     
-    # ✅ 修改：測試模式下拔除動能濾網，讓所有股票都能印出來
     frac = 0.0 if is_test else (0.12 if m <= 30 else 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0) if m <= 120 else min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0)))
     pb_lim = 1.0 if is_test else (0.012 if m <= 90 else 0.0039)
 
@@ -317,24 +325,20 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
         sym = f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}"
         try:
             if isinstance(raw_daily.columns, pd.MultiIndex):
-                if sym not in raw_daily.columns.get_level_values(0):
-                    yf_diag["yf_fail"] += 1; continue
+                if sym not in raw_daily.columns.get_level_values(0): diag["yf_fail"] += 1; continue
                 df_sym = raw_daily[sym]
             else: df_sym = raw_daily
             
-            if not {"Close", "Volume"}.issubset(set(df_sym.columns)):
-                yf_diag["yf_fail"] += 1; continue
-                
+            if not {"Close", "Volume"}.issubset(set(df_sym.columns)): diag["yf_fail"] += 1; continue
             dfD = df_sym[["Close", "Volume"]].dropna()
-            if len(dfD) < 30: yf_diag["yf_fail"] += 1; continue
+            if len(dfD) < 30: diag["yf_fail"] += 1; continue
             
             dates_tw = idx_date_taipei(dfD.index)
             past_df = dfD[dates_tw < today_date].copy()
-            if len(past_df) < 30: yf_diag["yf_fail"] += 1; continue
+            if len(past_df) < 30: diag["yf_fail"] += 1; continue
             
             vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
-            if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0:
-                yf_diag["yf_fail"] += 1; continue
+            if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0: diag["yf_fail"] += 1; continue
 
             past_boards, past_10 = 0, past_df.tail(10)
             for i in range(len(past_10)-1, 0, -1):
@@ -357,15 +361,16 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
 
             results.append({"代號": c, "名稱": name, "現價": r["last"], "爆量": vol_ratio, "狀態": "🔒 已鎖" if is_locked else "⚡ 發動", "階段": f"連續 {past_boards+1} 板", "board_val": past_boards})
         except Exception as e:
-            yf_diag["other_err"] += 1; diag_err(diag, e, "FILTER")
+            diag["other_err"] += 1; diag_err(diag, e, "FILTER")
             
     res_df = pd.DataFrame(results)
     if not res_df.empty: res_df = res_df.sort_values(["board_val", "爆量"], ascending=[False, False])
-    return res_df, stats, yf_diag
+    return res_df, stats, diag
 
 # =========================
 # UI / MAIN EXECUTION
 # =========================
+st.set_page_config(page_title="起漲戰情室 Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
 <style>
     [data-testid="stAppViewContainer"], .main { background: #050505 !important; background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important; color: #e2e8f0 !important; }
@@ -390,7 +395,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v10.1 機構直通驗證版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v10.2 毫秒瞬切版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式 (無底線顯示)", value=False)
@@ -400,23 +405,26 @@ now_time = time.time()
 last_run = st.session_state.get("last_run_ts", 0)
 cooldown_seconds = 60
 
+# =========================
+# FETCH PHASE (Network calls only)
+# =========================
 if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
     if now_time - last_run < cooldown_seconds:
         st.warning(f"⏳ 保護 API 額度中，請等待 {int(cooldown_seconds - (now_time - last_run))} 秒後再發動狙擊...")
     else:
         st.session_state["last_run_ts"] = now_time
-        t0, diag = time.perf_counter(), diag_init()
+        t0, base_diag = time.perf_counter(), diag_init()
         
-        with st.status("⚡ 鎖定市場熱點資金中...", expanded=True) as status:
+        with st.status("⚡ 鎖定市場熱點資金中 (抓取原始資料)...", expanded=True) as status:
             t = time.perf_counter(); meta, meta_errs = get_stock_list()
-            diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
-            for err in meta_errs: diag_err(diag, Exception(err), "META_ERR")
+            base_diag["t_meta"] = time.perf_counter() - t; base_diag["meta_count"] = len(meta)
+            for err in meta_errs: diag_err(base_diag, Exception(err), "META_ERR")
             
             t = time.perf_counter()
             status.update(label="🔥 攔截市場成交量排行榜...", state="running")
-            top_tickers = fetch_top_volume_tickers(diag)
-            diag["t_rank"] = time.perf_counter() - t
-            diag["rank_count"] = len(top_tickers)
+            top_tickers = fetch_top_volume_tickers(base_diag)
+            base_diag["t_rank"] = time.perf_counter() - t
+            base_diag["rank_count"] = len(top_tickers)
             
             if not top_tickers:
                 st.error("🚨 無法取得排行榜資料，請稍後再試。")
@@ -425,46 +433,64 @@ if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
             filtered_meta = {k: v for k, v in meta.items() if k in top_tickers}
 
             t = time.perf_counter(); now_ts = now_taipei()
-            pre_df = fast_fugle_scan(filtered_meta, status, now_ts, is_test, diag, top_tickers)
-            diag["t_api"] = time.perf_counter() - t
-            diag["cand_total"] = diag.get("fugle_rows", len(pre_df))
+            # 抓取「無任何過濾」的原始富果資料
+            raw_fugle_df = fast_fugle_scan_raw(filtered_meta, status, base_diag, top_tickers)
+            base_diag["t_api"] = time.perf_counter() - t
+            base_diag["total_fetch_time"] = time.perf_counter() - t0
+            status.update(label="✅ 資料快取完成！", state="complete")
             
-            t = time.perf_counter()
-            status.update(label="⚙️ 執行動能濾網與歷史血統分析...", state="running")
-            final_res, stats, yf_diag = core_filter_engine(pre_df, meta, now_ts, is_test, diag, use_bloodline)
-            diag["t_filter"] = time.perf_counter() - t; diag.update(yf_diag)
-            diag["total"] = time.perf_counter() - t0
-            status.update(label="✅ 狙擊完成", state="complete")
-            
-        st.session_state["last_scan"] = {"res": final_res, "stats": stats, "diag": diag, "ts": now_ts, "is_test": is_test, "use_bloodline": use_bloodline}
-        st.rerun() 
+        # 將原始資料存入保險箱
+        st.session_state["raw_data_vault"] = {
+            "df": raw_fugle_df,
+            "meta": meta,
+            "ts": now_ts,
+            "base_diag": base_diag
+        }
 
-scan = st.session_state.get("last_scan")
-if scan:
-    d, res, sts, ts = scan["diag"], scan["res"], scan["stats"], scan["ts"]
-    t_str = f"測試: {'ON' if scan['is_test'] else 'OFF'} | 血統: {'ON' if scan['use_bloodline'] else 'OFF'}"
-    st.markdown(f'<div class="status-caption">上次更新：{ts.strftime("%H:%M:%S")} | {t_str} | 總耗時：{d["total"]:.2f}s</div>', unsafe_allow_html=True)
+# =========================
+# FILTER & RENDER PHASE (Instant)
+# =========================
+if "raw_data_vault" in st.session_state:
+    vault = st.session_state["raw_data_vault"]
+    
+    # 執行瞬間過濾 (0網路請求)
+    t_filter_start = time.perf_counter()
+    res, sts, final_diag = apply_dynamic_filters(
+        raw_df=vault["df"], 
+        meta_dict=vault["meta"], 
+        now_ts=vault["ts"], 
+        is_test=is_test, 
+        use_bloodline=use_bloodline, 
+        base_diag=vault["base_diag"]
+    )
+    final_diag["t_filter"] = time.perf_counter() - t_filter_start
+    total_time = final_diag.get("total_fetch_time", 0) + final_diag["t_filter"]
+    
+    # 顯示結果
+    ts = vault["ts"]
+    t_str = f"測試: {'ON' if is_test else 'OFF'} | 血統: {'ON' if use_bloodline else 'OFF'}"
+    st.markdown(f'<div class="status-caption">資料時間：{ts.strftime("%H:%M:%S")} | {t_str} | 濾網運算耗時：{final_diag["t_filter"]:.3f}s</div>', unsafe_allow_html=True)
     
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("排行榜捕捉數量", f"{d.get('rank_count', 0)} 檔", f"來源: {d.get('rank_src', '未知')}")
+    m1.metric("排行榜捕捉數量", f"{final_diag.get('rank_count', 0)} 檔", f"來源: {final_diag.get('rank_src', '未知')}")
     m2.metric("嚴選錄取檔數", len(res))
-    total_parse = d.get("fugle_parse_ok", 0) + d.get("fugle_parse_fail", 0)
-    m3.metric("API 解析良率", f"{(d.get('fugle_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
-    m4.metric("系統異常阻擋", d.get("fugle_req_err",0) + d.get("yf_fail",0) + d.get("other_err",0))
+    total_parse = final_diag.get("fugle_parse_ok", 0) + final_diag.get("fugle_parse_fail", 0)
+    m3.metric("API 解析良率", f"{(final_diag.get('fugle_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
+    m4.metric("系統異常阻擋", final_diag.get("fugle_req_err",0) + final_diag.get("yf_fail",0) + final_diag.get("other_err",0))
 
     with st.expander("⚙️ 系統診斷與底層監控 (白盒分析)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Meta 總檔數", d.get("meta_count"))
-        c2.metric("富果 API 有效", d.get("fugle_parse_ok"))
-        st.caption(f"🛡️ 富果探針：HTTP 錯誤 {d.get('fugle_http_err',0)}")
-        c3.metric("YF 數據覆蓋", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
-        rescue_msg = f"{'🟢 啟動' if d.get('yf_rescue_used', 0) else '⚪ 待命'} | ERR {d.get('other_err',0)}"
+        c1.metric("Meta 總檔數", final_diag.get("meta_count"))
+        c2.metric("富果 API 有效", final_diag.get("fugle_parse_ok"))
+        st.caption(f"🛡️ 富果探針：HTTP 錯誤 {final_diag.get('fugle_http_err',0)}")
+        c3.metric("YF 數據覆蓋", f"{final_diag.get('yf_returned',0)} / {final_diag.get('yf_symbols',0)}")
+        rescue_msg = f"{'🟢 啟動' if final_diag.get('yf_rescue_used', 0) else '⚪ 待命'} | ERR {final_diag.get('other_err',0)}"
         c4.metric("救援協議 / 錯誤", rescue_msg)
-        if d.get('yf_rescue_used', 0):
-            st.caption(f"⚠️ 細胞分裂救援：成功 {d.get('yf_parts_ok', 0)} 塊 / 失敗 {d.get('yf_parts_fail', 0)} 塊")
+        if final_diag.get('yf_rescue_used', 0):
+            st.caption(f"⚠️ 細胞分裂救援：成功 {final_diag.get('yf_parts_ok', 0)} 塊 / 失敗 {final_diag.get('yf_parts_fail', 0)} 塊")
             
-        st.caption(f"耗時分布：Meta {d['t_meta']:.2f}s | 榜單 {d['t_rank']:.2f}s | 富果 API {d['t_api']:.2f}s | YF {d.get('t_yf',0):.2f}s | Filter {d['t_filter']:.2f}s")
-        if d.get("last_errors"): st.code("\n".join(d["last_errors"]))
+        st.caption(f"耗時分布：Meta {final_diag['t_meta']:.2f}s | 榜單 {final_diag['t_rank']:.2f}s | 富果 API {final_diag['t_api']:.2f}s | 濾網瞬切 {final_diag['t_filter']:.3f}s")
+        if final_diag.get("last_errors"): st.code("\n".join(final_diag["last_errors"]))
 
     with st.expander("🎯 戰損與淘汰名單 (實名點名)", expanded=True):
         for reason, stocks in sts.items():
@@ -487,7 +513,7 @@ if scan:
                     </div>
                 </div>""", unsafe_allow_html=True)
     else: 
-        if d.get("fugle_parse_ok", 0) == 0:
+        if final_diag.get("fugle_parse_ok", 0) == 0:
             st.error("🚨 嚴重警告：無法連接到富果 API。請確認您的授權金鑰是否有效。")
         else:
-            st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
+            st.warning("⚠️ 目前無標的通過您當前設定的濾網條件，請嘗試切換「寬鬆測試模式」。")
