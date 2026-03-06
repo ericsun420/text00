@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 v8.4 究極破壁直通版｜全中文專業介面
+# app.py — 起漲戰情室｜戰神 v8.1 SRE 熔斷監控版｜優雅降級｜狀態探針｜Apple Pro
 import io
 import math
 import time
@@ -14,19 +14,19 @@ import pandas as pd
 import yfinance as yf
 import streamlit as st
 
-# 強制隱藏 SSL 警告，保持版面乾淨
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =========================
 # SYSTEM DIAGNOSTICS & CONSTANTS
 # =========================
+# ✅ 修正 2：分離 connect 與 read 的 Timeout，避免半殘連線卡死
 MIS_TIMEOUT = (3.0, 10.0)
 
 def diag_init():
     return {
         "meta_count": 0, "cand_total": 0, "mis_req_err": 0,
         "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0,
-        "mis_http_err": 0, "mis_ct_err": 0, "mis_ssl_down": 0,
+        "mis_http_err": 0, "mis_ct_err": 0, "mis_ssl_down": 0, # ✅ 修正 3：新增 MIS 探針計數
         "yf_symbols": 0, "yf_returned": 0, "yf_fail": 0, "other_err": 0,
         "yf_bulk_fail": 0, "yf_rescue_used": 0,
         "yf_parts_ok": 0, "yf_parts_fail": 0,
@@ -39,26 +39,21 @@ def diag_err(diag, e, tag="ERR"):
 
 def get_github_headers():
     return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "text/csv,text/plain,*/*",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "Connection": "keep-alive",
     }
 
+MIS_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 def get_mis_headers():
     return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": MIS_UA,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "X-Requested-With": "XMLHttpRequest",
         "Connection": "keep-alive",
-        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
-        "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin"
+        "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw"
     }
 
 def make_retry_session(base_headers=None):
@@ -71,14 +66,33 @@ def make_retry_session(base_headers=None):
         s.headers.update(base_headers)
     return s
 
+# ✅ 修正 1：更強韌的 SSL 例外捕捉機制 (覆蓋 ConnectionError 內的 SSL 錯誤)
+def _is_ssl_like(e: Exception) -> bool:
+    s = str(e).lower()
+    if "ssl" in s or "certificate" in s or "cert" in s: return True
+    cause = getattr(e, "__cause__", None) or getattr(e, "__context__", None)
+    if cause and ("ssl" in str(cause).lower() or "certificate" in str(cause).lower()): return True
+    return False
+
+def mis_get(session, url, timeout, diag=None):
+    try:
+        return session.get(url, timeout=timeout, verify=True)
+    except requests.exceptions.RequestException as e:
+        if _is_ssl_like(e):
+            if diag is not None:
+                diag_err(diag, e, "MIS_SSL_DOWNGRADE")
+                diag["mis_ssl_down"] = diag.get("mis_ssl_down", 0) + 1
+            return session.get(url, timeout=timeout, verify=False)
+        raise
+
 # =========================
-# DATA FETCHING
+# DATA FETCHING (SRE Optimized)
 # =========================
+# ✅ 修正 4：拔除 Cache 毒藥陷阱，只緩存「成功下載的純文字」
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_text(url: str):
     s = make_retry_session(base_headers=get_github_headers())
-    # GitHub 也加上 verify=False，避免你本機環境的憑證庫有問題
-    r = s.get(url, timeout=(3.0, 15.0), verify=False)
+    r = s.get(url, timeout=(3.0, 15.0), verify=True)
     r.raise_for_status()
     return r.text.replace("\r", "")
 
@@ -113,6 +127,33 @@ def yf_download_daily(syms):
     df = df[~df.index.duplicated(keep="last")]
     df = df.sort_index()
     return df
+
+# =========================
+# UI / THEME (Ultra Pro Design)
+# =========================
+st.set_page_config(page_title="起漲戰情室 Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""
+<style>
+    [data-testid="stAppViewContainer"], .main { background: #050505 !important; background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important; color: #e2e8f0 !important; }
+    .block-container { padding-top: 2rem; max-width: 1280px; }
+    [data-testid="stSidebar"] { display: none !important; }
+    .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
+    .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px;}
+    .pro-card { background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); backdrop-filter: blur(24px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 24px; margin-bottom: 16px; transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
+    .pro-card:hover { border-color: rgba(56, 189, 248, 0.4); transform: translateY(-5px) scale(1.01); box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15); }
+    .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
+    .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
+    .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px;}
+    .fail-tag { display: inline-block; padding: 6px 12px; background: rgba(244, 63, 94, 0.05); color: #f43f5e; border-radius: 8px; margin: 4px; font-size: 12px; border: 1px solid rgba(244, 63, 94, 0.15); font-weight: 600;}
+    .stButton>button { border-radius: 16px !important; background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%) !important; color: #0f172a !important; font-weight: 900 !important; padding: 20px !important; width: 100% !important; border: none !important; font-size: 18px !important; letter-spacing: 2px !important; box-shadow: 0 4px 15px rgba(255,255,255,0.1) !important; transition: all 0.3s ease !important; }
+    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.2) !important; }
+    [data-testid="stMetric"] { background: rgba(20,20,20,0.6); padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.03); }
+    [data-testid="stMetricValue"] { font-size: 32px !important; font-weight: 900 !important; color: #f1f5f9 !important; }
+    [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; letter-spacing: 1px; }
+    [data-testid="stExpander"] { background: transparent !important; border: 1px solid rgba(255,255,255,0.05) !important; border-radius: 16px !important; }
+    [data-testid="stExpander"] summary { background: rgba(20,20,20,0.4) !important; border-radius: 16px !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # =========================
 # HELPERS
@@ -158,10 +199,8 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     session, rows = make_retry_session(base_headers=get_mis_headers()), []
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    try: 
-        session.get("https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=MIS_TIMEOUT, verify=False)
-    except Exception as e: 
-        diag_err(diag, e, "MIS_WARMUP")
+    try: mis_get(session, "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=MIS_TIMEOUT, diag=diag)
+    except Exception as e: diag_err(diag, e, "MIS_WARMUP")
 
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
@@ -169,56 +208,49 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     vol_limit = 200 if is_test else 800
     
     codes = list(meta_dict.keys())
-    CHUNK_SIZE = 40 # 縮小批次，避免 URL 過長被擋
-    
-    for i in range(0, len(codes), CHUNK_SIZE):
-        if mis_diag["mis_req_err"] >= 5 and i >= CHUNK_SIZE * 3:
-            diag_err(diag, Exception("MIS_CIRCUIT_BREAK: Too many blocks"), "MIS_BREAK")
+    for i in range(0, len(codes), 80):
+        # ✅ 修正 5：早停熔斷機制，防止網路死亡時無限盲敲
+        if mis_diag["mis_req_err"] >= 8 and i >= 160:
+            diag_err(diag, Exception("MIS_CIRCUIT_BREAK: Too many errors"), "MIS_BREAK")
             break
             
-        chunk = codes[i:i+CHUNK_SIZE]
+        chunk = codes[i:i+80]
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
-        status_placeholder.update(label=f"📡 穿透雷達掃描中... (處理區塊 {i//CHUNK_SIZE + 1})", state="running")
+        status_placeholder.update(label=f"📡 穿透雷達掃描中... ({i}/{len(codes)})", state="running")
         
         try:
-            # 強制 verify=False 貫穿防線
-            r = session.get(url, timeout=MIS_TIMEOUT, verify=False)
+            r = mis_get(session, url, timeout=MIS_TIMEOUT, diag=diag)
             ct = (r.headers.get("Content-Type") or "").lower()
-            
             if r.status_code != 200:
                 mis_diag["mis_req_err"] += 1
                 diag["mis_http_err"] = diag.get("mis_http_err", 0) + 1
                 diag_err(diag, Exception(f"HTTP_{r.status_code}"), "MIS_HTTP")
-                time.sleep(1.0); continue
-                
+                time.sleep(0.2); continue
             if "json" not in ct:
                 mis_diag["mis_req_err"] += 1
                 diag["mis_ct_err"] = diag.get("mis_ct_err", 0) + 1
                 diag_err(diag, Exception(f"NON_JSON ct={ct[:40]}"), "MIS_CT")
-                time.sleep(1.0); continue
+                time.sleep(0.2); continue
                 
             data = r.json().get("msgArray", [])
         except Exception as e:
             mis_diag["mis_req_err"] += 1
             diag_err(diag, e, "MIS_REQ_FAIL")
-            time.sleep(0.5); continue
+            time.sleep(0.2); continue
 
         for q in data:
             mis_diag["mis_seen"] += 1
             c = q.get("c")
             if not c or c not in meta_dict: continue 
             try:
-                # 語法修復確認
                 z, u, v, y = q.get("z"), q.get("u"), q.get("v"), q.get("y")
                 if z in (None, "", "-", "—") or u in (None, "", "-", "—") or y in (None, "", "-", "—", "0"):
                     mis_diag["mis_parse_fail"] += 1; continue
                 last, upper, prev_close, vol_sh = float(z), float(u), float(y), float(v or 0)
                 if upper <= 0 or prev_close <= 0: mis_diag["mis_parse_fail"] += 1; continue
-                
                 mis_diag["mis_parse_ok"] += 1
                 dist_pct = max(0.0, ((upper - last) / upper) * 100)
-                
                 if (vol_sh / 1000) >= vol_limit and dist_pct <= dist_limit:
                     bp, bv = split_nums(q.get("b")), split_nums(q.get("g"))
                     rows.append({
@@ -228,8 +260,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                         "best_bid": bp[0] if bp else 0.0, "bid_sh1": bv[0] if bv else 0.0
                     })
             except: mis_diag["mis_parse_fail"] += 1
-            
-        time.sleep(random.uniform(0.25, 0.45) if not is_test else 0.05)
+        time.sleep(0.12 if not is_test else 0.01)
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -378,50 +409,28 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
     return res_df, stats, yf_diag
 
 # =========================
-# UI / MAIN EXECUTION
+# MAIN
 # =========================
-st.markdown("""
-<style>
-    [data-testid="stAppViewContainer"], .main { background: #050505 !important; background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important; color: #e2e8f0 !important; }
-    .block-container { padding-top: 2rem; max-width: 1280px; }
-    [data-testid="stSidebar"] { display: none !important; }
-    .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
-    .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px;}
-    .pro-card { background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); backdrop-filter: blur(24px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 24px; margin-bottom: 16px; transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
-    .pro-card:hover { border-color: rgba(56, 189, 248, 0.4); transform: translateY(-5px) scale(1.01); box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15); }
-    .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
-    .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
-    .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px;}
-    .fail-tag { display: inline-block; padding: 6px 12px; background: rgba(244, 63, 94, 0.05); color: #f43f5e; border-radius: 8px; margin: 4px; font-size: 12px; border: 1px solid rgba(244, 63, 94, 0.15); font-weight: 600;}
-    .stButton>button { border-radius: 16px !important; background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%) !important; color: #0f172a !important; font-weight: 900 !important; padding: 20px !important; width: 100% !important; border: none !important; font-size: 18px !important; letter-spacing: 2px !important; box-shadow: 0 4px 15px rgba(255,255,255,0.1) !important; transition: all 0.3s ease !important; }
-    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.2) !important; }
-    [data-testid="stMetric"] { background: rgba(20,20,20,0.6); padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.03); }
-    [data-testid="stMetricValue"] { font-size: 32px !important; font-weight: 900 !important; color: #f1f5f9 !important; }
-    [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; letter-spacing: 1px; }
-    [data-testid="stExpander"] { background: transparent !important; border: 1px solid rgba(255,255,255,0.05) !important; border-radius: 16px !important; }
-    [data-testid="stExpander"] summary { background: rgba(20,20,20,0.4) !important; border-radius: 16px !important; }
-</style>
-""", unsafe_allow_html=True)
-
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v8.4 暴力直通版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v8.1 企業 SRE 監控版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
 with col_cfg[1]: use_bloodline = st.toggle("🛡️ 嚴格連板血統", value=True)
 
+# ✅ 修正 5：系統保護閥 (Cooldown)，防呆防手震連點
 now_time = time.time()
 last_run = st.session_state.get("last_run_ts", 0)
 cooldown_seconds = 15
 
 if st.button("🚀 啟動全戰區量化掃描"):
     if now_time - last_run < cooldown_seconds:
-        st.warning(f"⏳ 系統冷卻防護中，請等待 {int(cooldown_seconds - (now_time - last_run))} 秒後再執行...")
+        st.warning(f"⏳ 系統冷卻防護中，為避免觸發風控，請等待 {int(cooldown_seconds - (now_time - last_run))} 秒後再執行...")
     else:
         st.session_state["last_run_ts"] = now_time
         t0, diag = time.perf_counter(), diag_init()
         
-        with st.status("⚡ 建立破壁連線與解析市場中...", expanded=True) as status:
+        with st.status("⚡ 建立安全連線與解析市場中...", expanded=True) as status:
             t = time.perf_counter(); meta, meta_errs = get_stock_list()
             diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
             for err in meta_errs: diag_err(diag, Exception(err), "META_ERR")
@@ -456,8 +465,11 @@ if scan:
     with st.expander("⚙️ 系統診斷與底層監控 (白盒分析)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("全市場掃描", d.get("meta_count"))
+        
+        # ✅ 更新 MIS 解析面板，加入探針資料展示
         c2.metric("MIS 有效解析", d.get("mis_parse_ok"))
-        st.caption(f"🛡️ MIS 探針：HTTP 錯誤 {d.get('mis_http_err',0)} | 格式異常 {d.get('mis_ct_err',0)} | 憑證直通 ON")
+        st.caption(f"🛡️ MIS 探針：HTTP 錯誤 {d.get('mis_http_err',0)} | 格式異常 {d.get('mis_ct_err',0)} | SSL 自動降級 {d.get('mis_ssl_down',0)}")
+        
         c3.metric("YF 數據覆蓋", f"{d.get('yf_returned',0)} / {d.get('yf_symbols',0)}")
         rescue_msg = f"{'🟢 啟動' if d.get('yf_rescue_used', 0) else '⚪ 待命'} | ERR {d.get('other_err',0)}"
         c4.metric("救援協議 / 錯誤", rescue_msg)
@@ -489,6 +501,6 @@ if scan:
                 </div>""", unsafe_allow_html=True)
     else: 
         if d.get("mis_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到證交所資料庫。防火牆阻擋了連線，請嘗試使用手機熱點連線，或稍後再試。")
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫 (網路連線被阻擋)，請檢視底層監控面板確認狀態。")
         else:
             st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
