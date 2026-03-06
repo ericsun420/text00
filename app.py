@@ -1,3 +1,4 @@
+import html
 import io
 import math
 import os
@@ -97,6 +98,7 @@ def make_retry_session(base_headers=None, total=2, backoff=0.7, pool=20):
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=("GET",),
         raise_on_status=False,
+        respect_retry_after_header=False,
     )
     adapter = HTTPAdapter(max_retries=retry, pool_connections=pool, pool_maxsize=pool)
     s.mount("https://", adapter)
@@ -997,7 +999,7 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
 
 def make_backtest_display(bt_df: pd.DataFrame):
     if bt_df is None or bt_df.empty:
-        return bt_df, None
+        return pd.DataFrame()
 
     display_df = bt_df.rename(
         columns={
@@ -1015,37 +1017,81 @@ def make_backtest_display(bt_df: pd.DataFrame):
     ).copy()
 
     display_df = display_df[["代號", "名稱", "訊號日", "進場日", "出場日", "進場價", "出場價", "報酬率%", "連板血統", "爆量倍率"]]
+    return display_df
 
-    def ret_style(v):
-        if pd.isna(v):
-            return ""
-        if v >= 6:
-            return "color:#ecfdf5;background:rgba(34,197,94,0.24);font-weight:900;"
-        if v > 0:
-            return "color:#bbf7d0;background:rgba(34,197,94,0.14);font-weight:800;"
-        if v <= -6:
-            return "color:#fff1f2;background:rgba(251,113,133,0.24);font-weight:900;"
-        if v < 0:
-            return "color:#fecdd3;background:rgba(251,113,133,0.14);font-weight:800;"
-        return "color:#e2e8f0;font-weight:800;"
 
-    styler = (
-        display_df.style
-        .format({"進場價": "{:.2f}", "出場價": "{:.2f}", "報酬率%": "{:+.2f}%", "爆量倍率": "{:.2f}x"})
-        .map(ret_style, subset=["報酬率%"])
-        .set_properties(**{
-            "background": "rgba(9,14,22,0.88)",
-            "color": "#e5eef8",
-            "border-color": "rgba(255,255,255,0.06)",
-            "font-size": "13px",
-        })
-        .set_table_styles([
-            {"selector": "th", "props": [("background", "rgba(255,255,255,0.04)"), ("color", "#9fb3c8"), ("font-weight", "800"), ("border", "1px solid rgba(255,255,255,0.06)")]},
-            {"selector": "td", "props": [("border", "1px solid rgba(255,255,255,0.05)")]},
-            {"selector": "table", "props": [("border-collapse", "collapse"), ("border-radius", "14px"), ("overflow", "hidden")]},
-        ])
-    )
-    return display_df, styler
+def render_error_panel(errors):
+    if not errors:
+        return
+
+    counts = {}
+    order = []
+    for msg in errors:
+        if msg not in counts:
+            counts[msg] = 0
+            order.append(msg)
+        counts[msg] += 1
+
+    rows = []
+    for msg in order:
+        count = counts[msg]
+        tag = "重複" if count > 1 else "單次"
+        badge = f"<span class='log-count'>{count}x</span>" if count > 1 else ""
+        rows.append(
+            f"<div class='log-row'><span class='log-tag'>{tag}</span><span class='log-msg'>{html.escape(msg)}</span>{badge}</div>"
+        )
+
+    st.markdown("<div class='log-panel'>" + "".join(rows) + "</div>", unsafe_allow_html=True)
+
+
+def render_backtest_table(display_df: pd.DataFrame):
+    if display_df is None or display_df.empty:
+        return
+
+    headers = list(display_df.columns)
+    header_html = "".join([f"<th>{html.escape(str(h))}</th>" for h in headers])
+
+    body_rows = []
+    for _, row in display_df.iterrows():
+        ret = float(row["報酬率%"]) if pd.notna(row["報酬率%"]) else 0.0
+        if ret >= 6:
+            ret_class = "ret-strong"
+        elif ret > 0:
+            ret_class = "ret-pos"
+        elif ret <= -6:
+            ret_class = "ret-weak"
+        elif ret < 0:
+            ret_class = "ret-neg"
+        else:
+            ret_class = "ret-flat"
+
+        cells = []
+        for col in headers:
+            val = row[col]
+            cls = "num" if col in ["進場價", "出場價", "連板血統", "爆量倍率"] else ""
+            if col == "報酬率%":
+                val_html = f"<span class='ret-chip {ret_class}'>{ret:+.2f}%</span>"
+                cls = "num"
+            elif col in ["進場價", "出場價"]:
+                val_html = f"{float(val):.2f}"
+            elif col == "爆量倍率":
+                val_html = f"{float(val):.2f}x"
+            else:
+                val_html = html.escape(str(val))
+            cells.append(f"<td class='{cls}'>{val_html}</td>")
+        body_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    table_html = f"""
+    <div class='bt-wrap'>
+      <div class='bt-table-scroll'>
+        <table class='bt-table'>
+          <thead><tr>{header_html}</tr></thead>
+          <tbody>{''.join(body_rows)}</tbody>
+        </table>
+      </div>
+    </div>
+    """
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -1221,6 +1267,85 @@ st.markdown(
 [data-testid="stDataFrame"] [role="grid"] {
     background: transparent !important;
 }
+
+.log-panel {
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(10,14,20,0.92), rgba(7,10,14,0.98));
+    padding: 10px 12px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+}
+.log-row {
+    display:flex; align-items:flex-start; gap:10px;
+    padding: 10px 8px; border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.log-row:last-child {border-bottom:none;}
+.log-tag {
+    min-width: 42px; text-align:center;
+    border-radius: 999px; padding: 3px 8px;
+    background: rgba(251,113,133,0.10); color:#fecdd3;
+    border:1px solid rgba(251,113,133,0.16); font-size:11px; font-weight:800;
+}
+.log-msg {
+    flex:1; color:#d7e5f4; font-size:13px; line-height:1.55;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    word-break: break-word;
+}
+.log-count {
+    color:#93c5fd; background:rgba(59,130,246,0.10); border:1px solid rgba(59,130,246,0.18);
+    border-radius:999px; padding:3px 8px; font-size:11px; font-weight:900;
+}
+.bt-wrap {
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 18px;
+    background: linear-gradient(180deg, rgba(9,13,19,0.96), rgba(6,9,13,0.99));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 18px 44px rgba(0,0,0,0.26);
+    overflow: hidden;
+}
+.bt-table-scroll {
+    overflow-x: auto;
+}
+.bt-table {
+    width: 100%;
+    min-width: 1120px;
+    border-collapse: separate;
+    border-spacing: 0;
+    table-layout: fixed;
+}
+.bt-table thead th {
+    position: sticky; top: 0; z-index: 2;
+    text-align: left;
+    padding: 13px 12px;
+    background: linear-gradient(180deg, rgba(18,24,34,0.98), rgba(13,18,26,0.98));
+    color: #9fb7cf;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: .5px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+.bt-table tbody td {
+    padding: 12px;
+    color: #edf4fb;
+    font-size: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.bt-table tbody tr:nth-child(odd) td {background: rgba(255,255,255,0.015);}
+.bt-table tbody tr:nth-child(even) td {background: rgba(255,255,255,0.028);}
+.bt-table tbody tr:hover td {background: rgba(56,189,248,0.08);}
+.bt-table td.num {text-align: right; font-variant-numeric: tabular-nums;}
+.ret-chip {
+    display:inline-flex; align-items:center; justify-content:center; min-width:82px;
+    border-radius:999px; padding:5px 10px; font-weight:900; letter-spacing:.2px;
+}
+.ret-strong {background: rgba(34,197,94,0.18); color:#bbf7d0; border:1px solid rgba(34,197,94,0.22);}
+.ret-pos {background: rgba(74,222,128,0.12); color:#dcfce7; border:1px solid rgba(74,222,128,0.18);}
+.ret-flat {background: rgba(148,163,184,0.10); color:#e2e8f0; border:1px solid rgba(148,163,184,0.14);}
+.ret-neg {background: rgba(251,113,133,0.12); color:#ffe4e6; border:1px solid rgba(251,113,133,0.18);}
+.ret-weak {background: rgba(244,63,94,0.20); color:#fff1f2; border:1px solid rgba(244,63,94,0.24);}
+
 hr {
     border: none;
     border-top: 1px solid rgba(255,255,255,0.08);
@@ -1404,7 +1529,7 @@ if "raw_data_vault_v12" in st.session_state:
             f"YF 分段成功 {final_diag.get('yf_parts_ok', 0)} ｜ 失敗 {final_diag.get('yf_parts_fail', 0)} ｜ Feature fail {final_diag.get('feature_fail', 0)} ｜ Other err {final_diag.get('other_err', 0)}"
         )
         if final_diag.get("last_errors"):
-            st.code("\n".join(final_diag["last_errors"]))
+            render_error_panel(list(final_diag["last_errors"]))
 
     with st.expander("🎯 戰損與淘汰名單", expanded=True):
         for reason, items in stats.items():
@@ -1452,9 +1577,9 @@ if "raw_data_vault_v12" in st.session_state:
         b4.metric("中位數", f"{bt_stats['median_return']}%")
         b5.metric("最佳 / 最差", f"{bt_stats['best']}% / {bt_stats['worst']}%")
         if not bt_df.empty:
-            bt_show, bt_styler = make_backtest_display(bt_df)
-            st.dataframe(bt_styler, use_container_width=True, hide_index=True, height=420)
-            st.caption("報酬率綠色代表較佳，紅色代表較弱；表格已改成戰情室深色樣式，閱讀會比預設表格乾淨很多。")
+            bt_show = make_backtest_display(bt_df)
+            render_backtest_table(bt_show)
+            st.caption("表格已改成桌機友善的高對比深色版，欄位固定、數字靠右、報酬率用色塊顯示，長時間盯盤會比預設白底表格舒服很多。")
         else:
             st.info("目前替身驗證沒有產生足夠訊號，常見原因是血統濾網太嚴、候選池太窄，或近 126 日這批股票沒有足夠符合條件的事件。")
 
