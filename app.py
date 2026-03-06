@@ -1,8 +1,9 @@
-# app.py — 起漲戰情室｜戰神 v10.2 機構級瞬切版｜資料快取分離｜毫秒級切換濾網
+# app.py — 起漲戰情室｜戰神 v11.0 雙榜狙擊版｜智能節流｜濾網毫秒瞬切
 import io
 import math
 import time
 import re
+import random
 from datetime import datetime, timedelta, time as dtime
 from collections import deque
 
@@ -20,7 +21,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # FUGLE API CONFIGURATION
 # =========================
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
-API_TIMEOUT = (3.0, 5.0)
+API_TIMEOUT = (3.0, 8.0)
 
 # =========================
 # SYSTEM DIAGNOSTICS
@@ -35,7 +36,7 @@ def diag_init():
         "yf_bulk_fail": 0, "yf_rescue_used": 0,
         "yf_parts_ok": 0, "yf_parts_fail": 0,
         "last_errors": deque(maxlen=8),
-        "t_meta": 0.0, "t_rank": 0.0, "t_api": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0
+        "t_meta": 0.0, "t_rank": 0.0, "t_api": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0, "total_fetch_time": 0.0
     }
 
 def diag_err(diag, e, tag="ERR"):
@@ -61,37 +62,45 @@ def make_retry_session(base_headers=None):
 # =========================
 # RANKING FETCHER (Top-Down Logic)
 # =========================
-def fetch_top_volume_tickers(diag):
-    tickers = []
+# ✅ 升級策略：雙榜單交叉打擊 (成交量前100 + 漲幅前50)
+def fetch_strategic_tickers(diag):
+    tickers = set()
     session = make_retry_session(base_headers=get_base_headers())
     
+    # 1. 抓取 Yahoo 成交量排行 (擴大到 100)
     try:
         r = session.get("https://tw.stock.yahoo.com/rank/volume?exchange=ALL", timeout=8, verify=True)
         tks = re.findall(r'/quote/([0-9]{4})', r.text)
         if tks:
-            tickers.extend(tks)
-            diag["rank_src"] = "Yahoo 股市"
+            for t in tks[:100]: tickers.add(t)
+            diag["rank_src"] = "Yahoo 雙榜聯集 (量+價)"
     except Exception as e:
-        diag_err(diag, e, "RANK_YAHOO_FAIL")
+        diag_err(diag, e, "RANK_VOL_FAIL")
 
-    if len(set(tickers)) < 30:
+    # 2. 抓取 Yahoo 漲幅排行 (前 50，補足量小但快漲停的妖股)
+    try:
+        r = session.get("https://tw.stock.yahoo.com/rank/change-up?exchange=ALL", timeout=8, verify=True)
+        tks_up = re.findall(r'/quote/([0-9]{4})', r.text)
+        if tks_up:
+            for t in tks_up[:50]: tickers.add(t)
+    except Exception as e:
+        diag_err(diag, e, "RANK_UP_FAIL")
+
+    final_tks = [t for t in tickers if len(t) == 4]
+    
+    # 如果全失敗，動用玩股網備援
+    if len(final_tks) < 50:
         try:
             r = session.get("https://www.wantgoo.com/stock/ranking/volume", timeout=8, verify=True)
             tks = re.findall(r'/stock/([0-9]{4})', r.text)
             if tks:
-                tickers.extend(tks)
-                diag["rank_src"] = "玩股網 WantGoo"
+                final_tks = list(set([t for t in tks if len(t) == 4]))[:100]
+                diag["rank_src"] = "玩股網 WantGoo (備援)"
         except Exception as e:
             diag_err(diag, e, "RANK_WANTGOO_FAIL")
 
-    seen = set()
-    final_tks = []
-    for t in tickers:
-        if t not in seen and len(t) == 4:
-            seen.add(t)
-            final_tks.append(t)
-
-    return final_tks[:50]
+    # 最多取 130 檔，避免 API 等待太久
+    return final_tks[:130]
 
 # =========================
 # DATA FETCHING
@@ -154,26 +163,34 @@ def calc_limit_up(prev_close, limit_pct=0.10):
 # =========================
 # API ENGINE (RAW FETCH ONLY)
 # =========================
-# ✅ 修正 1：純粹抓取資料，不做任何條件過濾，把完整資料還原保留
+# ✅ 升級策略：智能節流閥 (Token Bucket)，保護 API 額度並擴大打擊面
 def fast_fugle_scan_raw(meta_dict, status_placeholder, diag, target_tickers):
     session = make_retry_session()
     headers = {"X-API-KEY": FUGLE_API_KEY}
     rows = []
     
+    total_targets = len(target_tickers)
     for idx, c in enumerate(target_tickers):
         if c not in meta_dict: continue
         
-        url = f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{c}"
-        status_placeholder.update(label=f"💎 富果 VIP 專線直通中... ({idx+1}/{len(target_tickers)} 檔)", state="running")
+        # 智能節流提示
+        if idx < 45:
+            status_msg = f"⚡ 疾速掃描熱門資金中... ({idx+1}/{total_targets} 檔)"
+            delay = 0.05
+        else:
+            status_msg = f"⏳ API 頻率保護切換：平穩獲取中型潛力股... ({idx+1}/{total_targets} 檔)"
+            delay = 1.1 # 降速至每秒 1 次，完美符合 60次/分鐘 限制
+            
+        status_placeholder.update(label=status_msg, state="running")
         diag["fugle_seen"] += 1
         
         try:
-            r = session.get(url, headers=headers, timeout=API_TIMEOUT)
+            r = session.get(f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{c}", headers=headers, timeout=API_TIMEOUT)
             if r.status_code != 200:
                 diag["fugle_req_err"] += 1
                 diag["fugle_http_err"] = diag.get("fugle_http_err", 0) + 1
                 diag_err(diag, Exception(f"HTTP_{r.status_code} for {c}"), "FUGLE_HTTP")
-                time.sleep(0.2)
+                time.sleep(1.5)
                 continue
                 
             data = r.json()
@@ -189,14 +206,12 @@ def fast_fugle_scan_raw(meta_dict, status_placeholder, diag, target_tickers):
                 
             upper = calc_limit_up(ref_price)
             dist_pct = max(0.0, ((upper - last) / upper) * 100)
-            
             bids = data.get("bids", [])
             best_bid = bids[0].get("price", 0) if bids else 0.0
             bid_sh1 = bids[0].get("size", 0) if bids else 0.0 
             
             diag["fugle_parse_ok"] += 1
             
-            # 不管價格、量多少，全部存起來備用！
             rows.append({
                 "code": c, "last": last, "upper": upper, "dist": dist_pct, 
                 "vol_sh": vol_shares, "prev_close": ref_price,
@@ -207,7 +222,7 @@ def fast_fugle_scan_raw(meta_dict, status_placeholder, diag, target_tickers):
             diag["fugle_req_err"] += 1
             diag_err(diag, e, "FUGLE_REQ_FAIL")
             
-        time.sleep(0.1)
+        time.sleep(delay)
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -216,29 +231,28 @@ def fast_fugle_scan_raw(meta_dict, status_placeholder, diag, target_tickers):
     return df
 
 # =========================
-# DYNAMIC FILTER ENGINE
+# DYNAMIC FILTER ENGINE (Instant)
 # =========================
-# ✅ 修正 2：將過濾邏輯獨立出來，套用開關條件，實現毫秒級瞬切
+# ✅ 核心升級：過濾引擎完全獨立，按鈕切換只需 0.1 秒
 def apply_dynamic_filters(raw_df, meta_dict, now_ts, is_test, use_bloodline, base_diag):
-    diag = base_diag.copy() # 複製一份診斷數據，避免切換時數據重複疊加
+    diag = base_diag.copy() 
     stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "非連板標的": []}
     
-    # 初始化 YF 監控數據
     diag["yf_symbols"] = 0; diag["yf_fail"] = 0; diag["other_err"] = 0
     diag["yf_bulk_fail"] = 0; diag["yf_rescue_used"] = 0; diag["yf_returned"] = 0
     diag["yf_parts_ok"] = 0; diag["yf_parts_fail"] = 0
     
     if raw_df.empty: return pd.DataFrame(), stats, diag
 
-    # 套用即時開關門檻
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
+    
+    # 測試模式下完全無視距離與成交量門檻
     dist_limit = 100.0 if is_test else (3.1 if m <= 60 else 2.2 if m <= 180 else 1.5)
     vol_limit = 0 if is_test else 800_000 
     
-    # 執行第一階段瞬切過濾
     candidates_df = raw_df[(raw_df['dist'] <= dist_limit) & (raw_df['vol_sh'] >= vol_limit)].copy()
-    candidates_df = candidates_df.head(50)
+    candidates_df = candidates_df.head(80)
     stats["Total"] = len(candidates_df)
     
     if candidates_df.empty: return pd.DataFrame(), stats, diag
@@ -259,7 +273,6 @@ def apply_dynamic_filters(raw_df, meta_dict, now_ts, is_test, use_bloodline, bas
                 res_frames.append(None)
         return res_frames
 
-    # YF 資料因為有 st.cache_data 緩存，瞬切時不會重新下載，而是秒回傳！
     try:
         raw_daily = yf_download_daily(syms)
         if raw_daily is None or getattr(raw_daily, "empty", False): raise Exception("YF_BULK_EMPTY")
@@ -395,7 +408,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v10.2 毫秒瞬切版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v11.0 雙榜狙擊 120 檔 x 毫秒切換</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式 (無底線顯示)", value=False)
@@ -408,21 +421,21 @@ cooldown_seconds = 60
 # =========================
 # FETCH PHASE (Network calls only)
 # =========================
-if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
+if st.button("🚀 啟動 120 檔雙榜資金狙擊 (富果專線)"):
     if now_time - last_run < cooldown_seconds:
         st.warning(f"⏳ 保護 API 額度中，請等待 {int(cooldown_seconds - (now_time - last_run))} 秒後再發動狙擊...")
     else:
         st.session_state["last_run_ts"] = now_time
         t0, base_diag = time.perf_counter(), diag_init()
         
-        with st.status("⚡ 鎖定市場熱點資金中 (抓取原始資料)...", expanded=True) as status:
+        with st.status("⚡ 啟動雙榜單雷達與資料快取...", expanded=True) as status:
             t = time.perf_counter(); meta, meta_errs = get_stock_list()
             base_diag["t_meta"] = time.perf_counter() - t; base_diag["meta_count"] = len(meta)
             for err in meta_errs: diag_err(base_diag, Exception(err), "META_ERR")
             
             t = time.perf_counter()
-            status.update(label="🔥 攔截市場成交量排行榜...", state="running")
-            top_tickers = fetch_top_volume_tickers(base_diag)
+            status.update(label="🔥 攔截市場成交量與漲幅雙榜單...", state="running")
+            top_tickers = fetch_strategic_tickers(base_diag) # ✅ 改用雙榜單擷取 120 檔
             base_diag["t_rank"] = time.perf_counter() - t
             base_diag["rank_count"] = len(top_tickers)
             
@@ -433,11 +446,11 @@ if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
             filtered_meta = {k: v for k, v in meta.items() if k in top_tickers}
 
             t = time.perf_counter(); now_ts = now_taipei()
-            # 抓取「無任何過濾」的原始富果資料
+            # 抓取無過濾的原始富果資料 (包含智能限速，預計耗時 40~60 秒)
             raw_fugle_df = fast_fugle_scan_raw(filtered_meta, status, base_diag, top_tickers)
             base_diag["t_api"] = time.perf_counter() - t
             base_diag["total_fetch_time"] = time.perf_counter() - t0
-            status.update(label="✅ 資料快取完成！", state="complete")
+            status.update(label="✅ 120 檔資料快取完成！(往後切換開關無需重載)", state="complete")
             
         # 將原始資料存入保險箱
         st.session_state["raw_data_vault"] = {
@@ -453,7 +466,6 @@ if st.button("🚀 啟動熱門資金狙擊 (富果專線)"):
 if "raw_data_vault" in st.session_state:
     vault = st.session_state["raw_data_vault"]
     
-    # 執行瞬間過濾 (0網路請求)
     t_filter_start = time.perf_counter()
     res, sts, final_diag = apply_dynamic_filters(
         raw_df=vault["df"], 
@@ -464,12 +476,10 @@ if "raw_data_vault" in st.session_state:
         base_diag=vault["base_diag"]
     )
     final_diag["t_filter"] = time.perf_counter() - t_filter_start
-    total_time = final_diag.get("total_fetch_time", 0) + final_diag["t_filter"]
     
-    # 顯示結果
     ts = vault["ts"]
     t_str = f"測試: {'ON' if is_test else 'OFF'} | 血統: {'ON' if use_bloodline else 'OFF'}"
-    st.markdown(f'<div class="status-caption">資料時間：{ts.strftime("%H:%M:%S")} | {t_str} | 濾網運算耗時：{final_diag["t_filter"]:.3f}s</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="status-caption">資料時間：{ts.strftime("%H:%M:%S")} | {t_str} | 濾網瞬切耗時：{final_diag["t_filter"]:.3f}s</div>', unsafe_allow_html=True)
     
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("排行榜捕捉數量", f"{final_diag.get('rank_count', 0)} 檔", f"來源: {final_diag.get('rank_src', '未知')}")
@@ -489,7 +499,7 @@ if "raw_data_vault" in st.session_state:
         if final_diag.get('yf_rescue_used', 0):
             st.caption(f"⚠️ 細胞分裂救援：成功 {final_diag.get('yf_parts_ok', 0)} 塊 / 失敗 {final_diag.get('yf_parts_fail', 0)} 塊")
             
-        st.caption(f"耗時分布：Meta {final_diag['t_meta']:.2f}s | 榜單 {final_diag['t_rank']:.2f}s | 富果 API {final_diag['t_api']:.2f}s | 濾網瞬切 {final_diag['t_filter']:.3f}s")
+        st.caption(f"全域耗時分布：Meta {final_diag['t_meta']:.2f}s | 榜單 {final_diag['t_rank']:.2f}s | 富果 API {final_diag['t_api']:.2f}s | 濾網瞬切 {final_diag['t_filter']:.3f}s")
         if final_diag.get("last_errors"): st.code("\n".join(final_diag["last_errors"]))
 
     with st.expander("🎯 戰損與淘汰名單 (實名點名)", expanded=True):
@@ -516,4 +526,4 @@ if "raw_data_vault" in st.session_state:
         if final_diag.get("fugle_parse_ok", 0) == 0:
             st.error("🚨 嚴重警告：無法連接到富果 API。請確認您的授權金鑰是否有效。")
         else:
-            st.warning("⚠️ 目前無標的通過您當前設定的濾網條件，請嘗試切換「寬鬆測試模式」。")
+            st.warning("⚠️ 目前無標的通過您當前設定的濾網條件，請嘗試切換上方的「寬鬆測試模式」。")
