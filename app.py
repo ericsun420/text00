@@ -693,6 +693,56 @@ def get_thresholds(now_ts, is_test=False):
     }
 
 
+def score_to_star_count(signal_score, dist_pct, vol_ratio, board_streak, close_pos, proximity_52w, status_text=""):
+    """把通過濾網的候選股轉成 1~5 顆星推薦指數。"""
+    stars = 1
+    if signal_score >= 8.8:
+        stars = 5
+    elif signal_score >= 7.0:
+        stars = 4
+    elif signal_score >= 5.4:
+        stars = 3
+    elif signal_score >= 4.0:
+        stars = 2
+
+    bonus = 0.0
+    if dist_pct <= 0.20:
+        bonus += 1.0
+    elif dist_pct <= 0.50:
+        bonus += 0.5
+
+    if vol_ratio >= 3.0:
+        bonus += 1.0
+    elif vol_ratio >= 2.0:
+        bonus += 0.5
+
+    if board_streak >= 2:
+        bonus += 1.0
+    elif board_streak >= 1:
+        bonus += 0.5
+
+    if close_pos >= 0.95:
+        bonus += 0.5
+    elif close_pos < 0.85:
+        bonus -= 0.5
+
+    if proximity_52w >= 95:
+        bonus += 0.5
+    elif proximity_52w < 85:
+        bonus -= 0.25
+
+    if "鎖板" in str(status_text):
+        bonus += 0.5
+
+    stars = int(round(stars + bonus * 0.5))
+    return max(1, min(5, stars))
+
+
+def render_star_bar(stars):
+    stars = max(1, min(5, int(stars)))
+    return "★" * stars + "☆" * (5 - stars)
+
+
 def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
     diag = copy_diag(base_diag)
     stats = {"候選總數": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "血統不足": [], "資訊不足": []}
@@ -777,6 +827,24 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
                 "距漲停%": r["dist"],
                 "爆量": vol_ratio_live,
                 "日內強度": signal_score,
+                "推薦星等": score_to_star_count(
+                    signal_score=signal_score,
+                    dist_pct=r["dist"],
+                    vol_ratio=vol_ratio_live,
+                    board_streak=board_streak,
+                    close_pos=close_pos,
+                    proximity_52w=proximity_52w,
+                    status_text=status,
+                ),
+                "推薦指數": render_star_bar(score_to_star_count(
+                    signal_score=signal_score,
+                    dist_pct=r["dist"],
+                    vol_ratio=vol_ratio_live,
+                    board_streak=board_streak,
+                    close_pos=close_pos,
+                    proximity_52w=proximity_52w,
+                    status_text=status,
+                )),
                 "狀態": status,
                 "階段": f"歷史連板 {board_streak} 天",
                 "board_val": board_streak,
@@ -792,7 +860,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     res = pd.DataFrame(out)
     if not res.empty:
-        res = res.sort_values(["日內強度", "board_val", "爆量", "距漲停%"], ascending=[False, False, False, True]).reset_index(drop=True)
+        res = res.sort_values(["推薦星等", "日內強度", "board_val", "爆量", "距漲停%"], ascending=[False, False, False, False, True]).reset_index(drop=True)
     diag["final_count"] = len(res)
     return res, stats, diag
 
@@ -1019,6 +1087,9 @@ st.markdown(
 .card-name {font-size: 14px; color: #9fb0c5; font-weight: 700; margin-top: 2px;}
 .card-price {font-size: 38px; font-weight: 950; color: #ffffff; margin-top: 14px; letter-spacing: -1px;}
 .card-status {font-size: 13px; color: #d8e3ef; font-weight: 700; margin-top: 10px;}
+.card-stars-wrap {display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top: 14px;}
+.card-stars {font-size: 18px; letter-spacing: 1px; font-weight: 900; color: #ffd76a;}
+.card-stars-badge {font-size: 12px; color: #09111b; background: linear-gradient(135deg, #ffe082 0%, #f6c453 100%); border-radius: 999px; padding: 5px 10px; font-weight: 900;}
 .card-grid {display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px;}
 .stat-pill {
     border-radius: 14px;
@@ -1283,6 +1354,10 @@ if "raw_data_vault_v12" in st.session_state:
   <div class="card-name">{row['名稱']} ｜ {row['市場']}</div>
   <div class="card-price">{row['現價']:.2f}</div>
   <div class="card-status">{row['狀態']}</div>
+  <div class="card-stars-wrap">
+    <div class="card-stars">{row['推薦指數']}</div>
+    <div class="card-stars-badge">推薦 {int(row['推薦星等'])}/5</div>
+  </div>
   <div class="card-grid">
     <div class="stat-pill"><div class="stat-k">日內強度</div><div class="stat-v">{row['日內強度']:.2f}</div></div>
     <div class="stat-pill"><div class="stat-k">爆量倍率</div><div class="stat-v">{row['爆量']:.2f}x</div></div>
