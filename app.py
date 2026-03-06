@@ -1,4 +1,4 @@
-# app.py — 起漲戰情室｜戰神 v9.0 Top-Down 榜單狙擊版｜玩股網/Yahoo 雙源熱點｜Ultra Pro
+# app.py — 起漲戰情室｜戰神 v9.1 幽靈刺客版｜返璞歸真防封鎖｜Ultra Pro
 import io
 import math
 import time
@@ -25,7 +25,7 @@ MIS_TIMEOUT = (3.0, 10.0)
 def diag_init():
     return {
         "meta_count": 0, "rank_count": 0, "cand_total": 0, "mis_req_err": 0,
-        "rank_src": "None", # 追蹤是哪個排行榜建功
+        "rank_src": "None", 
         "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0,
         "mis_http_err": 0, "mis_ct_err": 0, "mis_ssl_down": 0,
         "yf_symbols": 0, "yf_returned": 0, "yf_fail": 0, "other_err": 0,
@@ -38,16 +38,18 @@ def diag_init():
 def diag_err(diag, e, tag="ERR"):
     diag["last_errors"].append(f"[{tag}] {type(e).__name__}: {e}")
 
+# ✅ 修正 1：極簡化 Headers。不穿過度華麗的偽裝，避免被防火牆比對 TLS 指紋抓包
 def get_base_headers():
     return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept": "*/*",
         "Connection": "keep-alive",
     }
 
 def make_retry_session(base_headers=None):
     s = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.5, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",), respect_retry_after_header=True)
+    # 移除 403 挑釁重試，並加入延遲
+    retry = Retry(total=2, backoff_factor=1.0, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",))
     adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
@@ -62,26 +64,13 @@ def _is_ssl_like(e: Exception) -> bool:
     if cause and ("ssl" in str(cause).lower() or "certificate" in str(cause).lower()): return True
     return False
 
-def mis_get(session, url, timeout, diag=None):
-    try:
-        return session.get(url, timeout=timeout, verify=True)
-    except requests.exceptions.RequestException as e:
-        if _is_ssl_like(e):
-            if diag is not None:
-                diag_err(diag, e, "MIS_SSL_DOWNGRADE")
-                diag["mis_ssl_down"] = diag.get("mis_ssl_down", 0) + 1
-            return session.get(url, timeout=timeout, verify=False)
-        raise
-
 # =========================
 # RANKING FETCHER (Top-Down Logic)
 # =========================
-# ✅ 核心戰術：直接抓取市場成交量排行，不再盲目全掃
 def fetch_top_volume_tickers(diag):
     tickers = []
     session = make_retry_session(base_headers=get_base_headers())
     
-    # 首選來源：Yahoo 股市成交量排行 (HTML 解析最穩)
     try:
         r = session.get("https://tw.stock.yahoo.com/rank/volume?exchange=ALL", timeout=8, verify=True)
         tks = re.findall(r'/quote/([0-9]{4})', r.text)
@@ -91,7 +80,6 @@ def fetch_top_volume_tickers(diag):
     except Exception as e:
         diag_err(diag, e, "RANK_YAHOO_FAIL")
 
-    # 備援來源：玩股網 (WantGoo) 備用機制
     if len(set(tickers)) < 50:
         try:
             r = session.get("https://www.wantgoo.com/stock/ranking/volume", timeout=8, verify=True)
@@ -102,7 +90,6 @@ def fetch_top_volume_tickers(diag):
         except Exception as e:
             diag_err(diag, e, "RANK_WANTGOO_FAIL")
 
-    # 去重並保留排序 (越前面量越大)
     seen = set()
     final_tks = []
     for t in tickers:
@@ -110,7 +97,6 @@ def fetch_top_volume_tickers(diag):
             seen.add(t)
             final_tks.append(t)
 
-    # 取前 350 名，這已經包辦了台股 95% 的活水資金
     return final_tks[:350]
 
 # =========================
@@ -119,7 +105,7 @@ def fetch_top_volume_tickers(diag):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_text(url: str):
     s = make_retry_session(base_headers=get_base_headers())
-    r = s.get(url, timeout=(3.0, 15.0), verify=True)
+    r = s.get(url, timeout=(3.0, 15.0), verify=False)
     r.raise_for_status()
     return r.text.replace("\r", "")
 
@@ -161,9 +147,7 @@ def yf_download_daily(syms):
 def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
 def idx_date_taipei(idx):
     try:
-        if getattr(idx, "tz", None) is not None:
-            try: return idx.tz_convert("Asia/Taipei").date
-            except: return idx.tz_localize(None).date
+        if getattr(idx, "tz", None) is not None: return idx.tz_convert("Asia/Taipei").date
     except: pass
     return idx.date
 def tw_tick(price): return 0.01 if price < 10 else 0.05 if price < 50 else 0.1 if price < 100 else 0.5 if price < 500 else 1.0 if price < 1000 else 5.0
@@ -191,12 +175,17 @@ def split_nums(s):
 # =========================
 def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     session, rows = make_retry_session(base_headers=get_base_headers()), []
-    session.headers.update({"Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", "X-Requested-With": "XMLHttpRequest"})
+    
+    # ✅ 修正 2：每次掃描前強制洗掉舊 Cookie，避免 WAF 透過 Session 追蹤異常頻率
+    session.cookies.clear()
     
     mis_diag = {"mis_req_err": 0, "mis_seen": 0, "mis_parse_ok": 0, "mis_parse_fail": 0, "mis_rows": 0}
     
-    try: mis_get(session, "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw", timeout=MIS_TIMEOUT, diag=diag)
-    except Exception as e: diag_err(diag, e, "MIS_WARMUP")
+    # 取通行證
+    try: 
+        session.get("https://mis.twse.com.tw/stock/fibest.jsp", timeout=MIS_TIMEOUT, verify=False)
+    except Exception as e: 
+        diag_err(diag, e, "MIS_WARMUP")
 
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m)) 
@@ -204,7 +193,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
     vol_limit = 200 if is_test else 800
     
     codes = list(meta_dict.keys())
-    CHUNK_SIZE = 50 
+    CHUNK_SIZE = 40 
     
     for i in range(0, len(codes), CHUNK_SIZE):
         if mis_diag["mis_req_err"] >= 3:
@@ -214,27 +203,29 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
         chunk = codes[i:i+CHUNK_SIZE]
         ex_ch = "%7c".join([f"{meta_dict[c]['ex']}_{c}.tw" for c in chunk])
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch={ex_ch}&json=1&delay=0&_={int(time.time()*1000)}"
-        status_placeholder.update(label=f"📡 精準微型刺探中... ({i}/{len(codes)} 檔)", state="running")
+        status_placeholder.update(label=f"📡 隱匿微型刺探中... ({i}/{len(codes)} 檔)", state="running")
         
         try:
-            r = mis_get(session, url, timeout=MIS_TIMEOUT, diag=diag)
+            r = session.get(url, timeout=MIS_TIMEOUT, verify=False)
             ct = (r.headers.get("Content-Type") or "").lower()
+            
             if r.status_code != 200:
                 mis_diag["mis_req_err"] += 1
                 diag["mis_http_err"] = diag.get("mis_http_err", 0) + 1
                 diag_err(diag, Exception(f"HTTP_{r.status_code}"), "MIS_HTTP")
-                time.sleep(1.0); continue
+                time.sleep(1.5); continue
+                
             if "json" not in ct:
                 mis_diag["mis_req_err"] += 1
                 diag["mis_ct_err"] = diag.get("mis_ct_err", 0) + 1
                 diag_err(diag, Exception(f"NON_JSON ct={ct[:40]}"), "MIS_CT")
-                time.sleep(1.0); continue
+                time.sleep(1.5); continue
                 
             data = r.json().get("msgArray", [])
         except Exception as e:
             mis_diag["mis_req_err"] += 1
             diag_err(diag, e, "MIS_REQ_FAIL")
-            time.sleep(0.5); continue
+            time.sleep(1.0); continue
 
         for q in data:
             mis_diag["mis_seen"] += 1
@@ -258,7 +249,7 @@ def fast_mis_scan(meta_dict, status_placeholder, now_ts, is_test, diag):
                     })
             except: mis_diag["mis_parse_fail"] += 1
             
-        time.sleep(random.uniform(0.1, 0.2)) # 因為數量極少，可以縮短間隔
+        time.sleep(random.uniform(0.3, 0.6)) # 輕微延遲模擬人類
 
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -321,7 +312,6 @@ def core_filter_engine(candidates_df, meta_dict, now_ts, is_test, diag, use_bloo
                         parts2.extend([p[:m2], p[m2:]])
                     else:
                         parts2.append(p)
-            
             if parts2:
                 frames2 = try_yf_parts(parts2)
                 diag["yf_parts_ok"] += sum(1 for f in frames2 if f is not None and not getattr(f, "empty", False))
@@ -433,7 +423,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v9.0 榜單狙擊版</div>', unsafe_allow_html=True)
+st.markdown('<div class="status-caption">量化交易終端機 v9.1 幽靈刺客版</div>', unsafe_allow_html=True)
 
 col_cfg = st.columns([1.2, 1.2, 1, 1])
 with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式", value=False)
@@ -455,14 +445,12 @@ if st.button("🚀 啟動熱門資金狙擊"):
             diag["t_meta"] = time.perf_counter() - t; diag["meta_count"] = len(meta)
             for err in meta_errs: diag_err(diag, Exception(err), "META_ERR")
             
-            # ✅ 新增步驟：抓取熱門排行榜 (Top-Down)
             t = time.perf_counter()
             status.update(label="🔥 攔截市場成交量排行榜...", state="running")
             top_tickers = fetch_top_volume_tickers(diag)
             diag["t_rank"] = time.perf_counter() - t
             diag["rank_count"] = len(top_tickers)
             
-            # 如果榜單抓取失敗，退回全市場掃描；否則只掃瞄榜單股
             if top_tickers:
                 filtered_meta = {k: v for k, v in meta.items() if k in top_tickers}
             else:
@@ -470,7 +458,6 @@ if st.button("🚀 啟動熱門資金狙擊"):
                 diag["rank_src"] = "全市場(榜單失效備援)"
 
             t = time.perf_counter(); now_ts = now_taipei()
-            # 現在 fast_mis_scan 只會去敲 MIS 3~5 次！
             pre_df, mis_diag = fast_mis_scan(filtered_meta, status, now_ts, is_test, diag)
             diag["t_mis"] = time.perf_counter() - t; diag.update(mis_diag); diag["cand_total"] = mis_diag.get("mis_rows", len(pre_df))
             
@@ -533,6 +520,6 @@ if scan:
                 </div>""", unsafe_allow_html=True)
     else: 
         if d.get("mis_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到證交所資料庫。防火牆阻擋了連線，請稍後再試。")
+            st.error("🚨 嚴重警告：無法連接到證交所資料庫。防火牆阻擋了連線，請確認您的網路 IP 沒有被暫時封鎖。")
         else:
             st.warning("⚠️ 掃描完畢。目前全市場無標的通過嚴格濾網。")
