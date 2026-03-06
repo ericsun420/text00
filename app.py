@@ -1,529 +1,1312 @@
-# app.py — 起漲戰情室｜戰神 v11.0 雙榜狙擊版｜智能節流｜濾網毫秒瞬切
 import io
 import math
-import time
+import os
 import re
-import random
-from datetime import datetime, timedelta, time as dtime
+import time
+from copy import deepcopy
+from datetime import datetime, timedelta, time as dtime, timezone
 from collections import deque
 
+import pandas as pd
 import requests
+import streamlit as st
+import urllib3
+import yfinance as yf
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import urllib3
-import pandas as pd
-import yfinance as yf
-import streamlit as st
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# =========================
-# FUGLE API CONFIGURATION
-# =========================
-FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
-API_TIMEOUT = (3.0, 8.0)
+# ============================================================
+# 基本設定
+# ============================================================
+APP_TITLE = "起漲戰情室 OMEGA"
+APP_SUBTITLE = "v12.0 真瞬切版｜官方快照優先｜雙榜狙擊｜內建驗證"
+API_TIMEOUT = (3.0, 10.0)
+PUBLIC_TIMEOUT = (3.0, 12.0)
+RAW_HISTORY_DAYS = 420
+DEFAULT_COOLDOWN_SECONDS = 45
+DEFAULT_TOP_VOLUME = 100
+DEFAULT_TOP_MOVERS = 50
+MAX_CANDIDATES = 140
+FINAL_ENRICH_LIMIT = 18
+YF_DOWNLOAD_CHUNK = 45
 
-# =========================
-# SYSTEM DIAGNOSTICS
-# =========================
+# ============================================================
+# 診斷
+# ============================================================
 def diag_init():
     return {
-        "meta_count": 0, "rank_count": 0, "cand_total": 0, "fugle_req_err": 0,
-        "rank_src": "None", 
-        "fugle_seen": 0, "fugle_parse_ok": 0, "fugle_parse_fail": 0, "fugle_rows": 0,
-        "fugle_http_err": 0,
-        "yf_symbols": 0, "yf_returned": 0, "yf_fail": 0, "other_err": 0,
-        "yf_bulk_fail": 0, "yf_rescue_used": 0,
-        "yf_parts_ok": 0, "yf_parts_fail": 0,
-        "last_errors": deque(maxlen=8),
-        "t_meta": 0.0, "t_rank": 0.0, "t_api": 0.0, "t_yf": 0.0, "t_filter": 0.0, "total": 0.0, "total_fetch_time": 0.0
+        "meta_count": 0,
+        "rank_count": 0,
+        "candidate_count": 0,
+        "final_count": 0,
+        "rank_src": "None",
+        "snapshot_ok": 0,
+        "snapshot_fail": 0,
+        "snapshot_market_ok": 0,
+        "quote_enrich_ok": 0,
+        "quote_enrich_fail": 0,
+        "public_rank_ok": 0,
+        "public_rank_fail": 0,
+        "yf_symbols": 0,
+        "yf_returned": 0,
+        "yf_parts_ok": 0,
+        "yf_parts_fail": 0,
+        "yf_fail": 0,
+        "feature_ok": 0,
+        "feature_fail": 0,
+        "other_err": 0,
+        "last_errors": deque(maxlen=12),
+        "t_meta": 0.0,
+        "t_snapshot": 0.0,
+        "t_rank": 0.0,
+        "t_features": 0.0,
+        "t_enrich": 0.0,
+        "t_filter": 0.0,
+        "t_backtest": 0.0,
+        "total": 0.0,
     }
+
 
 def diag_err(diag, e, tag="ERR"):
     diag["last_errors"].append(f"[{tag}] {type(e).__name__}: {e}")
 
+
+# ============================================================
+# HTTP / SESSION
+# ============================================================
 def get_base_headers():
     return {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145 Safari/537.36",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
         "Connection": "keep-alive",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
 
-def make_retry_session(base_headers=None):
+
+def make_retry_session(base_headers=None, total=2, backoff=0.7, pool=20):
     s = requests.Session()
-    retry = Retry(total=2, backoff_factor=1.0, status_forcelist=(429, 500, 502, 503, 504), allowed_methods=("GET",))
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=20, pool_maxsize=20)
+    retry = Retry(
+        total=total,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=pool, pool_maxsize=pool)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
+    s.headers.update(get_base_headers())
     if base_headers:
         s.headers.update(base_headers)
     return s
 
-# =========================
-# RANKING FETCHER (Top-Down Logic)
-# =========================
-# ✅ 升級策略：雙榜單交叉打擊 (成交量前100 + 漲幅前50)
-def fetch_strategic_tickers(diag):
-    tickers = set()
-    session = make_retry_session(base_headers=get_base_headers())
-    
-    # 1. 抓取 Yahoo 成交量排行 (擴大到 100)
-    try:
-        r = session.get("https://tw.stock.yahoo.com/rank/volume?exchange=ALL", timeout=8, verify=True)
-        tks = re.findall(r'/quote/([0-9]{4})', r.text)
-        if tks:
-            for t in tks[:100]: tickers.add(t)
-            diag["rank_src"] = "Yahoo 雙榜聯集 (量+價)"
-    except Exception as e:
-        diag_err(diag, e, "RANK_VOL_FAIL")
 
-    # 2. 抓取 Yahoo 漲幅排行 (前 50，補足量小但快漲停的妖股)
-    try:
-        r = session.get("https://tw.stock.yahoo.com/rank/change-up?exchange=ALL", timeout=8, verify=True)
-        tks_up = re.findall(r'/quote/([0-9]{4})', r.text)
-        if tks_up:
-            for t in tks_up[:50]: tickers.add(t)
-    except Exception as e:
-        diag_err(diag, e, "RANK_UP_FAIL")
-
-    final_tks = [t for t in tickers if len(t) == 4]
-    
-    # 如果全失敗，動用玩股網備援
-    if len(final_tks) < 50:
-        try:
-            r = session.get("https://www.wantgoo.com/stock/ranking/volume", timeout=8, verify=True)
-            tks = re.findall(r'/stock/([0-9]{4})', r.text)
-            if tks:
-                final_tks = list(set([t for t in tks if len(t) == 4]))[:100]
-                diag["rank_src"] = "玩股網 WantGoo (備援)"
-        except Exception as e:
-            diag_err(diag, e, "RANK_WANTGOO_FAIL")
-
-    # 最多取 130 檔，避免 API 等待太久
-    return final_tks[:130]
-
-# =========================
-# DATA FETCHING
-# =========================
+# ============================================================
+# 快取資料
+# ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_text(url: str):
-    s = make_retry_session(base_headers=get_base_headers())
-    r = s.get(url, timeout=(3.0, 15.0), verify=False)
+    s = make_retry_session()
+    r = s.get(url, timeout=PUBLIC_TIMEOUT, verify=False)
     r.raise_for_status()
     return r.text.replace("\r", "")
 
+
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_stock_list():
     meta, errors = {}, []
-    urls = [("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
-            ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv")]
+    urls = [
+        ("tse", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/twse_equities.csv"),
+        ("otc", "https://raw.githubusercontent.com/mlouielu/twstock/master/twstock/codes/tpex_equities.csv"),
+    ]
     for ex, url in urls:
         try:
             text = fetch_text(url)
             df = pd.read_csv(io.StringIO(text), dtype=str, engine="python", on_bad_lines="skip")
-            col_map = {c.strip().lower(): c for c in df.columns}
-            c_col, n_col, t_col = col_map.get('code') or df.columns[1], col_map.get('name') or df.columns[2], col_map.get('type')
+            cols = {c.strip().lower(): c for c in df.columns}
+            c_col = cols.get("code") or df.columns[1]
+            n_col = cols.get("name") or df.columns[2]
+            t_col = cols.get("type")
             for _, row in df.iterrows():
                 stype = str(row.get(t_col, "")) if t_col else ""
-                if t_col and ("權證" in stype or "ETF" in stype): continue
-                code = str(row[c_col]).strip()
-                if len(code) == 4 and code.isdigit(): meta[code] = {"name": str(row[n_col]), "ex": ex}
+                if t_col and ("ETF" in stype or "權證" in stype or "受益證券" in stype):
+                    continue
+                code = str(row.get(c_col, "")).strip()
+                if len(code) == 4 and code.isdigit():
+                    meta[code] = {
+                        "name": str(row.get(n_col, "")).strip(),
+                        "ex": ex,
+                        "market": "TSE" if ex == "tse" else "OTC",
+                    }
         except Exception as e:
-            if not isinstance(e, pd.errors.ParserError):
-                errors.append(f"{ex} - {str(e)}")
+            errors.append(f"{ex}: {e}")
     return meta, errors
 
-@st.cache_data(ttl=6*3600, show_spinner=False)
-def yf_download_daily(syms):
-    if not syms: return None
-    df = yf.download(tickers=" ".join(syms), period="120d", interval="1d", group_by="ticker", auto_adjust=False, threads=True, progress=False)
-    if df is None or getattr(df, "empty", False): return df
-    if not isinstance(df.columns, pd.MultiIndex):
-        t = syms[0]
-        df.columns = pd.MultiIndex.from_product([[t], df.columns])
-    df = df[~df.index.duplicated(keep="last")]
-    df = df.sort_index()
-    return df
 
-# =========================
-# HELPERS
-# =========================
-def now_taipei(): return datetime.utcnow() + timedelta(hours=8)
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def yf_download_daily(symbols, period="420d"):
+    if not symbols:
+        return pd.DataFrame()
+    data = yf.download(
+        tickers=" ".join(symbols),
+        period=period,
+        interval="1d",
+        group_by="ticker",
+        auto_adjust=False,
+        actions=False,
+        threads=True,
+        progress=False,
+        multi_level_index=True,
+        timeout=15,
+    )
+    if data is None or getattr(data, "empty", False):
+        return pd.DataFrame()
+    if not isinstance(data.columns, pd.MultiIndex):
+        t = symbols[0]
+        data.columns = pd.MultiIndex.from_product([[t], data.columns])
+    data = data.loc[~data.index.duplicated(keep="last")]
+    data = data.sort_index()
+    return data
+
+
+# ============================================================
+# 基本工具
+# ============================================================
+def now_taipei():
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)
+
+
 def idx_date_taipei(idx):
     try:
-        if getattr(idx, "tz", None) is not None: return idx.tz_convert("Asia/Taipei").date
-    except: pass
+        if getattr(idx, "tz", None) is not None:
+            return idx.tz_convert("Asia/Taipei").date
+    except Exception:
+        pass
     return idx.date
-def tw_tick(price): return 0.01 if price < 10 else 0.05 if price < 50 else 0.1 if price < 100 else 0.5 if price < 500 else 1.0 if price < 1000 else 5.0
+
+
+def tw_tick(price):
+    if price < 10:
+        return 0.01
+    if price < 50:
+        return 0.05
+    if price < 100:
+        return 0.1
+    if price < 500:
+        return 0.5
+    if price < 1000:
+        return 1.0
+    return 5.0
+
+
 def calc_limit_up(prev_close, limit_pct=0.10):
-    raw = prev_close * (1.0 + limit_pct)
+    raw = float(prev_close) * (1.0 + limit_pct)
     tick = tw_tick(raw)
     n = math.floor((raw + 1e-12) / tick)
-    return round(n * tick, 2 if tick < 0.1 else 1 if tick < 1 else 0)
+    if tick < 0.1:
+        digits = 2
+    elif tick < 1:
+        digits = 1
+    else:
+        digits = 0
+    return round(n * tick, digits)
 
-# =========================
-# API ENGINE (RAW FETCH ONLY)
-# =========================
-# ✅ 升級策略：智能節流閥 (Token Bucket)，保護 API 額度並擴大打擊面
-def fast_fugle_scan_raw(meta_dict, status_placeholder, diag, target_tickers):
-    session = make_retry_session()
-    headers = {"X-API-KEY": FUGLE_API_KEY}
-    rows = []
-    
-    total_targets = len(target_tickers)
-    for idx, c in enumerate(target_tickers):
-        if c not in meta_dict: continue
-        
-        # 智能節流提示
-        if idx < 45:
-            status_msg = f"⚡ 疾速掃描熱門資金中... ({idx+1}/{total_targets} 檔)"
-            delay = 0.05
-        else:
-            status_msg = f"⏳ API 頻率保護切換：平穩獲取中型潛力股... ({idx+1}/{total_targets} 檔)"
-            delay = 1.1 # 降速至每秒 1 次，完美符合 60次/分鐘 限制
-            
-        status_placeholder.update(label=status_msg, state="running")
-        diag["fugle_seen"] += 1
-        
+
+def safe_float(x, default=0.0):
+    try:
+        if x is None or x == "":
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+
+def safe_int(x, default=0):
+    try:
+        if x is None or x == "":
+            return default
+        return int(float(x))
+    except Exception:
+        return default
+
+
+def stable_unique(seq):
+    out, seen = [], set()
+    for x in seq:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def symbol_of(code, meta_dict):
+    return f"{code}.{'TW' if meta_dict[code]['ex'] == 'tse' else 'TWO'}"
+
+
+def market_of(code, meta_dict):
+    return meta_dict.get(code, {}).get("market", "TSE")
+
+
+def market_label(m):
+    return "上市" if m == "TSE" else "上櫃" if m == "OTC" else m
+
+
+def copy_diag(diag):
+    d = deepcopy(diag)
+    if not isinstance(d.get("last_errors"), deque):
+        d["last_errors"] = deque(d.get("last_errors", []), maxlen=12)
+    return d
+
+
+# ============================================================
+# Fugle API
+# ============================================================
+def get_api_key():
+    key = ""
+    try:
+        key = st.secrets.get("FUGLE_API_KEY", "")
+    except Exception:
+        key = ""
+    if not key:
+        key = os.getenv("FUGLE_API_KEY", "")
+    return str(key).strip()
+
+
+def fugle_get_json(session, path, api_key, params=None):
+    url = f"https://api.fugle.tw/marketdata/v1.0/stock/{path}"
+    headers = {"X-API-KEY": api_key}
+    r = session.get(url, headers=headers, params=params or {}, timeout=API_TIMEOUT)
+    return r
+
+
+def snapshot_quotes_market(session, api_key, market, diag):
+    r = fugle_get_json(session, f"snapshot/quotes/{market}", api_key, params={"type": "COMMONSTOCK"})
+    if r.status_code == 200:
+        diag["snapshot_market_ok"] += 1
+        return r.json()
+    if r.status_code in (401, 403, 429):
+        raise RuntimeError(f"SNAPSHOT_{market}_{r.status_code}")
+    raise RuntimeError(f"SNAPSHOT_{market}_{r.status_code}")
+
+
+def enrich_quotes_for_codes(session, api_key, codes, diag):
+    enriched = {}
+    for code in codes:
         try:
-            r = session.get(f"https://api.fugle.tw/marketdata/v1.0/stock/intraday/quote/{c}", headers=headers, timeout=API_TIMEOUT)
+            r = fugle_get_json(session, f"intraday/quote/{code}", api_key)
             if r.status_code != 200:
-                diag["fugle_req_err"] += 1
-                diag["fugle_http_err"] = diag.get("fugle_http_err", 0) + 1
-                diag_err(diag, Exception(f"HTTP_{r.status_code} for {c}"), "FUGLE_HTTP")
-                time.sleep(1.5)
+                diag["quote_enrich_fail"] += 1
+                diag_err(diag, Exception(f"HTTP_{r.status_code} {code}"), "QUOTE_ENRICH")
                 continue
-                
-            data = r.json()
-            ref_price = data.get("referencePrice", 0)
-            last = data.get("closePrice", ref_price)
-            high = data.get("highPrice", last)
-            low = data.get("lowPrice", last)
-            vol_shares = data.get("total", {}).get("tradeVolume", 0)
-            
-            if ref_price <= 0 or last <= 0:
-                diag["fugle_parse_fail"] += 1
-                continue
-                
-            upper = calc_limit_up(ref_price)
-            dist_pct = max(0.0, ((upper - last) / upper) * 100)
-            bids = data.get("bids", [])
-            best_bid = bids[0].get("price", 0) if bids else 0.0
-            bid_sh1 = bids[0].get("size", 0) if bids else 0.0 
-            
-            diag["fugle_parse_ok"] += 1
-            
-            rows.append({
-                "code": c, "last": last, "upper": upper, "dist": dist_pct, 
-                "vol_sh": vol_shares, "prev_close": ref_price,
-                "high": high, "low": low, "best_bid": best_bid, "bid_sh1": bid_sh1
-            })
-                
+            j = r.json()
+            bids = j.get("bids", []) or []
+            asks = j.get("asks", []) or []
+            top_bid = bids[0] if bids else {}
+            top_ask = asks[0] if asks else {}
+            enriched[code] = {
+                "best_bid": safe_float(top_bid.get("price"), 0.0),
+                "best_bid_size": safe_int(top_bid.get("size"), 0),
+                "best_ask": safe_float(top_ask.get("price"), 0.0),
+                "best_ask_size": safe_int(top_ask.get("size"), 0),
+            }
+            diag["quote_enrich_ok"] += 1
+            time.sleep(0.06)
         except Exception as e:
-            diag["fugle_req_err"] += 1
-            diag_err(diag, e, "FUGLE_REQ_FAIL")
-            
-        time.sleep(delay)
+            diag["quote_enrich_fail"] += 1
+            diag_err(diag, e, "QUOTE_ENRICH")
+    return enriched
 
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values(["dist", "vol_sh"], ascending=[True, False]).drop_duplicates("code", keep="first")
-    diag["fugle_rows"] = len(df)
-    return df
 
-# =========================
-# DYNAMIC FILTER ENGINE (Instant)
-# =========================
-# ✅ 核心升級：過濾引擎完全獨立，按鈕切換只需 0.1 秒
-def apply_dynamic_filters(raw_df, meta_dict, now_ts, is_test, use_bloodline, base_diag):
-    diag = base_diag.copy() 
-    stats = {"Total": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "非連板標的": []}
-    
-    diag["yf_symbols"] = 0; diag["yf_fail"] = 0; diag["other_err"] = 0
-    diag["yf_bulk_fail"] = 0; diag["yf_rescue_used"] = 0; diag["yf_returned"] = 0
-    diag["yf_parts_ok"] = 0; diag["yf_parts_fail"] = 0
-    
-    if raw_df.empty: return pd.DataFrame(), stats, diag
+# ============================================================
+# 公開榜單備援
+# ============================================================
+def fetch_public_ranking(diag):
+    session = make_retry_session()
+    ordered = []
 
-    m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
-    m = max(0, min(270, m)) 
-    
-    # 測試模式下完全無視距離與成交量門檻
-    dist_limit = 100.0 if is_test else (3.1 if m <= 60 else 2.2 if m <= 180 else 1.5)
-    vol_limit = 0 if is_test else 800_000 
-    
-    candidates_df = raw_df[(raw_df['dist'] <= dist_limit) & (raw_df['vol_sh'] >= vol_limit)].copy()
-    candidates_df = candidates_df.head(80)
-    stats["Total"] = len(candidates_df)
-    
-    if candidates_df.empty: return pd.DataFrame(), stats, diag
+    def push(items, limit=None):
+        nonlocal ordered
+        if limit is not None:
+            items = items[:limit]
+        ordered = stable_unique(ordered + [x for x in items if len(x) == 4 and x.isdigit()])
 
-    syms = [f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}" for c in candidates_df["code"]]
-    diag["yf_symbols"] = len(syms)
-    
-    t_yf_start = time.perf_counter()
-    raw_daily = None
-    
-    def try_yf_parts(parts):
-        res_frames = []
-        for part in parts:
-            if not part: res_frames.append(None); continue
-            try: res_frames.append(yf_download_daily(part))
-            except Exception as e:
-                diag_err(diag, e, "YF_PART_FAIL")
-                res_frames.append(None)
-        return res_frames
+    got_any = False
+    try:
+        r = session.get("https://tw.stock.yahoo.com/rank/volume?exchange=ALL", timeout=PUBLIC_TIMEOUT, verify=True)
+        r.raise_for_status()
+        tks = re.findall(r"/quote/([0-9]{4})", r.text)
+        if tks:
+            push(tks, DEFAULT_TOP_VOLUME)
+            got_any = True
+            diag["public_rank_ok"] += 1
+    except Exception as e:
+        diag["public_rank_fail"] += 1
+        diag_err(diag, e, "PUB_YAHOO_VOL")
 
     try:
-        raw_daily = yf_download_daily(syms)
-        if raw_daily is None or getattr(raw_daily, "empty", False): raise Exception("YF_BULK_EMPTY")
+        r = session.get("https://tw.stock.yahoo.com/rank/change-up?exchange=ALL", timeout=PUBLIC_TIMEOUT, verify=True)
+        r.raise_for_status()
+        tks = re.findall(r"/quote/([0-9]{4})", r.text)
+        if tks:
+            push(tks, DEFAULT_TOP_MOVERS)
+            got_any = True
+            diag["public_rank_ok"] += 1
     except Exception as e:
-        tag = "YF_BULK_EMPTY" if str(e) == "YF_BULK_EMPTY" else "YF_BULK_FAIL"
-        diag_err(diag, e, tag)
-        diag["yf_bulk_fail"] = diag.get("yf_bulk_fail", 0) + 1
-        diag["yf_rescue_used"] = 1
-        
-        mid = max(1, len(syms)//2)
-        parts1 = [syms[:mid], syms[mid:]]
-        frames1 = try_yf_parts(parts1)
-        
-        diag["yf_parts_ok"] = diag.get("yf_parts_ok", 0) + sum(1 for f in frames1 if f is not None and not getattr(f, "empty", False))
-        diag["yf_parts_fail"] = diag.get("yf_parts_fail", 0) + sum(1 for f in frames1 if f is None or getattr(f, "empty", False))
-        frames_ok = [f for f in frames1 if f is not None and not getattr(f, "empty", False)]
-        
-        if len(frames_ok) < 2:
-            parts2 = []
-            for i, f in enumerate(frames1):
-                if f is None or getattr(f, "empty", False):
-                    p = parts1[i]
-                    if not p: continue 
-                    if len(p) > 1:
-                        m2 = len(p)//2
-                        parts2.extend([p[:m2], p[m2:]])
-                    else: parts2.append(p)
-            if parts2:
-                frames2 = try_yf_parts(parts2)
-                diag["yf_parts_ok"] += sum(1 for f in frames2 if f is not None and not getattr(f, "empty", False))
-                diag["yf_parts_fail"] += sum(1 for f in frames2 if f is None or getattr(f, "empty", False))
-                frames_ok.extend([f for f in frames2 if f is not None and not getattr(f, "empty", False)])
+        diag["public_rank_fail"] += 1
+        diag_err(diag, e, "PUB_YAHOO_UP")
 
-        if frames_ok: 
-            raw_daily = pd.concat(frames_ok, axis=1)
-            if raw_daily is not None and not isinstance(raw_daily.columns, pd.MultiIndex):
-                fallback_t = syms[0]
-                try:
-                    for f in frames_ok:
-                        if f is not None and isinstance(getattr(f, "columns", None), pd.MultiIndex):
-                            fallback_t = f.columns.get_level_values(0)[0]; break
-                except: pass
-                raw_daily.columns = pd.MultiIndex.from_product([[fallback_t], raw_daily.columns])
-            if isinstance(raw_daily.columns, pd.MultiIndex):
-                raw_daily = raw_daily.loc[:, ~raw_daily.columns.duplicated()]
-            raw_daily = raw_daily[~raw_daily.index.duplicated(keep="last")]
-            raw_daily = raw_daily.sort_index()
-
-    diag["t_yf"] = time.perf_counter() - t_yf_start
-    if raw_daily is None or getattr(raw_daily, "empty", False):
-        diag["other_err"] += 1; return pd.DataFrame(), stats, diag
-
-    if isinstance(raw_daily.columns, pd.MultiIndex): diag["yf_returned"] = int(raw_daily.columns.get_level_values(0).nunique())
-    else: diag["yf_returned"] = 1
-
-    results, today_date = [], now_ts.date()
-    
-    frac = 0.0 if is_test else (0.12 if m <= 30 else 0.12 + (0.5 - 0.12) * ((m - 30) / 90.0) if m <= 120 else min(1.0, 0.5 + (1.0 - 0.5) * ((m - 120) / 150.0)))
-    pb_lim = 1.0 if is_test else (0.012 if m <= 90 else 0.0039)
-
-    for _, r in candidates_df.iterrows():
-        c, name = r["code"], meta_dict[r["code"]]["name"]
-        sym = f"{c}.{'TW' if meta_dict[c]['ex']=='tse' else 'TWO'}"
+    if len(ordered) < 40:
         try:
-            if isinstance(raw_daily.columns, pd.MultiIndex):
-                if sym not in raw_daily.columns.get_level_values(0): diag["yf_fail"] += 1; continue
-                df_sym = raw_daily[sym]
-            else: df_sym = raw_daily
-            
-            if not {"Close", "Volume"}.issubset(set(df_sym.columns)): diag["yf_fail"] += 1; continue
-            dfD = df_sym[["Close", "Volume"]].dropna()
-            if len(dfD) < 30: diag["yf_fail"] += 1; continue
-            
-            dates_tw = idx_date_taipei(dfD.index)
-            past_df = dfD[dates_tw < today_date].copy()
-            if len(past_df) < 30: diag["yf_fail"] += 1; continue
-            
-            vol_ma20_sh = float(past_df["Volume"].rolling(20).mean().iloc[-1])
-            if (not math.isfinite(vol_ma20_sh)) or vol_ma20_sh <= 0: diag["yf_fail"] += 1; continue
-
-            past_boards, past_10 = 0, past_df.tail(10)
-            for i in range(len(past_10)-1, 0, -1):
-                cp, pp = float(past_10["Close"].iloc[i]), float(past_10["Close"].iloc[i-1])
-                lim = calc_limit_up(pp)
-                if cp >= (lim - tw_tick(lim)): past_boards += 1
-                else: break
-
-            if use_bloodline and (not is_test) and past_boards < 1:
-                stats["非連板標的"].append(f"{c} {name}"); continue
-
-            is_locked = (r["best_bid"] >= r["upper"] - tw_tick(r["upper"])) and (r["bid_sh1"] >= (80000 if r["last"]<50 else 120000 if r["last"]<100 else 200000))
-            vol_ratio = r["vol_sh"] / (vol_ma20_sh * frac + 1e-9)
-            
-            if vol_ratio < (0.0 if is_test else 1.3): stats["爆量不足"].append(f"{c} {name}"); continue
-            
-            rng = r["high"] - r["low"]
-            if (r["high"] - r["last"]) / max(1e-9, r["high"]) > pb_lim: stats["回落過大"].append(f"{c} {name}"); continue
-            if (r["last"] - r["low"]) / max(1e-9, rng) < (0.0 if is_test else 0.80) and rng > 0.1: stats["收盤太弱"].append(f"{c} {name}"); continue
-
-            results.append({"代號": c, "名稱": name, "現價": r["last"], "爆量": vol_ratio, "狀態": "🔒 已鎖" if is_locked else "⚡ 發動", "階段": f"連續 {past_boards+1} 板", "board_val": past_boards})
+            r = session.get("https://www.wantgoo.com/stock/ranking/volume", timeout=PUBLIC_TIMEOUT, verify=True)
+            r.raise_for_status()
+            tks = re.findall(r"/stock/([0-9]{4})", r.text)
+            if tks:
+                push(tks, 100)
+                got_any = True
+                diag["public_rank_ok"] += 1
         except Exception as e:
-            diag["other_err"] += 1; diag_err(diag, e, "FILTER")
-            
-    res_df = pd.DataFrame(results)
-    if not res_df.empty: res_df = res_df.sort_values(["board_val", "爆量"], ascending=[False, False])
-    return res_df, stats, diag
+            diag["public_rank_fail"] += 1
+            diag_err(diag, e, "PUB_WANTGOO")
 
-# =========================
-# UI / MAIN EXECUTION
-# =========================
-st.set_page_config(page_title="起漲戰情室 Ultra", page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
-st.markdown("""
-<style>
-    [data-testid="stAppViewContainer"], .main { background: #050505 !important; background-image: radial-gradient(circle at 15% 50%, rgba(20, 20, 20, 1), transparent 25%), radial-gradient(circle at 85% 30%, rgba(10, 25, 40, 0.8), transparent 25%) !important; color: #e2e8f0 !important; }
-    .block-container { padding-top: 2rem; max-width: 1280px; }
-    [data-testid="stSidebar"] { display: none !important; }
-    .title { font-size: 58px; font-weight: 900; letter-spacing: -2px; background: linear-gradient(135deg, #ffffff 0%, #718096 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; text-align: center; margin-bottom: 5px; }
-    .status-caption { color: #64748b; font-size: 13px; text-align: center; margin-bottom: 30px; letter-spacing: 1px;}
-    .pro-card { background: linear-gradient(145deg, rgba(22, 24, 29, 0.9), rgba(13, 15, 18, 0.9)); backdrop-filter: blur(24px); border: 1px solid rgba(255, 255, 255, 0.05); border-top: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 24px; margin-bottom: 16px; transition: all 0.4s cubic-bezier(0.2, 0.8, 0.2, 1); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
-    .pro-card:hover { border-color: rgba(56, 189, 248, 0.4); transform: translateY(-5px) scale(1.01); box-shadow: 0 20px 40px -10px rgba(56, 189, 248, 0.15); }
-    .stock-name { font-size: 22px; font-weight: 800; color: #f8fafc; letter-spacing: 1px;}
-    .price-large { font-size: 36px; font-weight: 900; color: #ffffff; font-variant-numeric: tabular-nums; text-shadow: 0 2px 10px rgba(255,255,255,0.1);}
-    .tag-pro { padding: 5px 14px; border-radius: 6px; font-size: 11px; font-weight: 800; background: rgba(56, 189, 248, 0.1); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.2); letter-spacing: 1px;}
-    .fail-tag { display: inline-block; padding: 6px 12px; background: rgba(244, 63, 94, 0.05); color: #f43f5e; border-radius: 8px; margin: 4px; font-size: 12px; border: 1px solid rgba(244, 63, 94, 0.15); font-weight: 600;}
-    .stButton>button { border-radius: 16px !important; background: linear-gradient(135deg, #f8fafc 0%, #cbd5e1 100%) !important; color: #0f172a !important; font-weight: 900 !important; padding: 20px !important; width: 100% !important; border: none !important; font-size: 18px !important; letter-spacing: 2px !important; box-shadow: 0 4px 15px rgba(255,255,255,0.1) !important; transition: all 0.3s ease !important; }
-    .stButton>button:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(255,255,255,0.2) !important; }
-    [data-testid="stMetric"] { background: rgba(20,20,20,0.6); padding: 15px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.03); }
-    [data-testid="stMetricValue"] { font-size: 32px !important; font-weight: 900 !important; color: #f1f5f9 !important; }
-    [data-testid="stMetricLabel"] { font-size: 13px !important; color: #94a3b8 !important; font-weight: 600 !important; letter-spacing: 1px; }
-    [data-testid="stExpander"] { background: transparent !important; border: 1px solid rgba(255,255,255,0.05) !important; border-radius: 16px !important; }
-    [data-testid="stExpander"] summary { background: rgba(20,20,20,0.4) !important; border-radius: 16px !important; }
-</style>
-""", unsafe_allow_html=True)
+    if not got_any:
+        raise RuntimeError("PUBLIC_RANK_ALL_FAILED")
 
-st.markdown('<div class="title">起漲戰情室 ULTRA</div>', unsafe_allow_html=True)
-st.markdown('<div class="status-caption">量化交易終端機 v11.0 雙榜狙擊 120 檔 x 毫秒切換</div>', unsafe_allow_html=True)
+    diag["rank_src"] = "Yahoo / WantGoo 備援榜單"
+    return ordered[:MAX_CANDIDATES]
 
-col_cfg = st.columns([1.2, 1.2, 1, 1])
-with col_cfg[0]: is_test = st.toggle("🔥 寬鬆測試模式 (無底線顯示)", value=False)
-with col_cfg[1]: use_bloodline = st.toggle("🛡️ 嚴格連板血統", value=True)
 
-now_time = time.time()
-last_run = st.session_state.get("last_run_ts", 0)
-cooldown_seconds = 60
+# ============================================================
+# 官方快照優先：直接抓全市場快照後本地雙榜聯集
+# ============================================================
+def build_quotes_from_snapshot(snapshot_json, market, meta_dict):
+    rows = []
+    for item in snapshot_json.get("data", []) or []:
+        code = str(item.get("symbol", "")).strip()
+        if code not in meta_dict:
+            continue
+        last = safe_float(item.get("closePrice"), 0.0)
+        high = safe_float(item.get("highPrice"), last)
+        low = safe_float(item.get("lowPrice"), last)
+        open_ = safe_float(item.get("openPrice"), last)
+        vol = safe_int(item.get("tradeVolume"), 0)
+        val = safe_float(item.get("tradeValue"), 0.0)
+        chg = safe_float(item.get("change"), 0.0)
+        chg_pct = safe_float(item.get("changePercent"), 0.0)
+        prev_close = last - chg if last > 0 else 0.0
+        if prev_close <= 0:
+            # change/close異常時，先略過，避免漲停價錯算
+            continue
+        upper = calc_limit_up(prev_close)
+        dist_pct = max(0.0, (upper - last) / max(upper, 1e-9) * 100.0)
+        rows.append(
+            {
+                "code": code,
+                "name": meta_dict[code]["name"],
+                "market": market,
+                "open": open_,
+                "high": high,
+                "low": low,
+                "last": last,
+                "vol_sh": vol,
+                "trade_value": val,
+                "change": chg,
+                "change_pct": chg_pct,
+                "prev_close": prev_close,
+                "upper": upper,
+                "dist": dist_pct,
+                "last_updated": safe_int(item.get("lastUpdated"), 0),
+            }
+        )
+    return pd.DataFrame(rows)
 
-# =========================
-# FETCH PHASE (Network calls only)
-# =========================
-if st.button("🚀 啟動 120 檔雙榜資金狙擊 (富果專線)"):
-    if now_time - last_run < cooldown_seconds:
-        st.warning(f"⏳ 保護 API 額度中，請等待 {int(cooldown_seconds - (now_time - last_run))} 秒後再發動狙擊...")
+
+def fetch_market_snapshot_and_rank(meta_dict, api_key, diag, status_placeholder):
+    t0 = time.perf_counter()
+    session = make_retry_session()
+    quotes_frames = []
+    for market in ("TSE", "OTC"):
+        status_placeholder.update(label=f"⚡ 讀取 {market_label(market)} 官方快照中...", state="running")
+        try:
+            snap = snapshot_quotes_market(session, api_key, market, diag)
+            quotes_frames.append(build_quotes_from_snapshot(snap, market, meta_dict))
+            diag["snapshot_ok"] += 1
+        except Exception as e:
+            diag["snapshot_fail"] += 1
+            diag_err(diag, e, f"SNAPSHOT_{market}")
+    diag["t_snapshot"] = time.perf_counter() - t0
+
+    if not quotes_frames:
+        raise RuntimeError("SNAPSHOT_ALL_FAILED")
+
+    quotes_df = pd.concat(quotes_frames, ignore_index=True)
+    quotes_df = quotes_df.drop_duplicates("code", keep="first")
+
+    vol_top = quotes_df.sort_values(["vol_sh", "trade_value"], ascending=[False, False])["code"].head(DEFAULT_TOP_VOLUME).tolist()
+    mover_top = quotes_df.sort_values(["change_pct", "trade_value"], ascending=[False, False])["code"].head(DEFAULT_TOP_MOVERS).tolist()
+    ranked_codes = stable_unique(vol_top + mover_top)[:MAX_CANDIDATES]
+
+    candidate_df = quotes_df[quotes_df["code"].isin(ranked_codes)].copy()
+    order_map = {c: i for i, c in enumerate(ranked_codes)}
+    candidate_df["rank_order"] = candidate_df["code"].map(order_map)
+    candidate_df = candidate_df.sort_values(["rank_order", "dist", "vol_sh"], ascending=[True, True, False]).reset_index(drop=True)
+
+    diag["rank_src"] = "Fugle Snapshot 全市場快照（官方）"
+    diag["rank_count"] = len(ranked_codes)
+    diag["candidate_count"] = len(candidate_df)
+    diag["t_rank"] = max(diag.get("t_rank", 0.0), time.perf_counter() - t0)
+    return candidate_df, ranked_codes
+
+
+# ============================================================
+# 備援：公開榜單 + 逐檔 quote
+# ============================================================
+def fetch_candidate_rows_by_public_rank(meta_dict, api_key, diag, status_placeholder):
+    t0 = time.perf_counter()
+    ranked_codes = fetch_public_ranking(diag)
+    session = make_retry_session()
+    rows = []
+
+    for idx, code in enumerate(ranked_codes, start=1):
+        if code not in meta_dict:
+            continue
+        try:
+            if idx <= 35:
+                sleep_sec = 0.05
+                stage = "⚡ 快掃主力熱區"
+            elif idx <= 80:
+                sleep_sec = 0.18
+                stage = "🛰️ 穩定擴掃中段候選"
+            else:
+                sleep_sec = 0.30
+                stage = "🛡️ 節流保護掃描尾段"
+            status_placeholder.update(label=f"{stage}... ({idx}/{len(ranked_codes)})", state="running")
+            r = fugle_get_json(session, f"intraday/quote/{code}", api_key)
+            if r.status_code != 200:
+                diag["snapshot_fail"] += 1
+                diag_err(diag, Exception(f"HTTP_{r.status_code} {code}"), "PUBLIC_QUOTE")
+                time.sleep(min(0.6, sleep_sec + 0.1))
+                continue
+            j = r.json()
+            ref = safe_float(j.get("referencePrice"), 0.0)
+            last = safe_float(j.get("closePrice"), ref)
+            high = safe_float(j.get("highPrice"), last)
+            low = safe_float(j.get("lowPrice"), last)
+            open_ = safe_float(j.get("openPrice"), ref)
+            vol = safe_int((j.get("total") or {}).get("tradeVolume"), 0)
+            bids = j.get("bids", []) or []
+            asks = j.get("asks", []) or []
+            best_bid = safe_float(bids[0].get("price"), 0.0) if bids else 0.0
+            best_bid_size = safe_int(bids[0].get("size"), 0) if bids else 0
+            best_ask = safe_float(asks[0].get("price"), 0.0) if asks else 0.0
+            best_ask_size = safe_int(asks[0].get("size"), 0) if asks else 0
+            if ref <= 0 or last <= 0:
+                continue
+            upper = calc_limit_up(ref)
+            rows.append(
+                {
+                    "code": code,
+                    "name": meta_dict[code]["name"],
+                    "market": market_of(code, meta_dict),
+                    "open": open_,
+                    "high": high,
+                    "low": low,
+                    "last": last,
+                    "vol_sh": vol,
+                    "trade_value": 0.0,
+                    "change": last - ref,
+                    "change_pct": ((last - ref) / ref * 100.0) if ref else 0.0,
+                    "prev_close": ref,
+                    "upper": upper,
+                    "dist": max(0.0, (upper - last) / max(upper, 1e-9) * 100.0),
+                    "last_updated": 0,
+                    "best_bid": best_bid,
+                    "best_bid_size": best_bid_size,
+                    "best_ask": best_ask,
+                    "best_ask_size": best_ask_size,
+                    "rank_order": idx - 1,
+                }
+            )
+            diag["snapshot_ok"] += 1
+        except Exception as e:
+            diag["snapshot_fail"] += 1
+            diag_err(diag, e, "PUBLIC_QUOTE")
+        time.sleep(sleep_sec)
+
+    df = pd.DataFrame(rows).drop_duplicates("code", keep="first") if rows else pd.DataFrame()
+    diag["rank_count"] = len(ranked_codes)
+    diag["candidate_count"] = len(df)
+    diag["t_rank"] = time.perf_counter() - t0
+    return df, ranked_codes
+
+
+# ============================================================
+# 歷史特徵預先計算（真正瞬切關鍵）
+# ============================================================
+def _extract_symbol_frame(raw_daily, sym):
+    if raw_daily is None or getattr(raw_daily, "empty", False):
+        return pd.DataFrame()
+    if isinstance(raw_daily.columns, pd.MultiIndex):
+        if sym not in raw_daily.columns.get_level_values(0):
+            return pd.DataFrame()
+        return raw_daily[sym].copy()
+    return raw_daily.copy()
+
+
+def _consecutive_limit_ups(past_df, tail_n=12):
+    if len(past_df) < 2:
+        return 0
+    streak = 0
+    tail = past_df.tail(tail_n)
+    for i in range(len(tail) - 1, 0, -1):
+        cp = safe_float(tail["Close"].iloc[i], 0.0)
+        pp = safe_float(tail["Close"].iloc[i - 1], 0.0)
+        if cp <= 0 or pp <= 0:
+            break
+        lim = calc_limit_up(pp)
+        if cp >= lim - tw_tick(lim):
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def compute_feature_cache(candidate_df, meta_dict, diag, status_placeholder, period="420d"):
+    t0 = time.perf_counter()
+    if candidate_df.empty:
+        return {}, pd.DataFrame()
+
+    codes = [c for c in candidate_df["code"].tolist() if c in meta_dict]
+    syms = [symbol_of(c, meta_dict) for c in codes]
+    diag["yf_symbols"] = len(syms)
+
+    raw_parts = []
+    for i in range(0, len(syms), YF_DOWNLOAD_CHUNK):
+        part = syms[i : i + YF_DOWNLOAD_CHUNK]
+        status_placeholder.update(label=f"📚 預載歷史特徵中... ({min(i + len(part), len(syms))}/{len(syms)})", state="running")
+        try:
+            part_df = yf_download_daily(part, period=period)
+            if part_df is not None and not getattr(part_df, "empty", False):
+                raw_parts.append(part_df)
+                diag["yf_parts_ok"] += 1
+            else:
+                diag["yf_parts_fail"] += 1
+        except Exception as e:
+            diag["yf_parts_fail"] += 1
+            diag_err(diag, e, "YF_PART")
+
+    if not raw_parts:
+        diag["t_features"] = time.perf_counter() - t0
+        return {}, pd.DataFrame()
+
+    raw_daily = pd.concat(raw_parts, axis=1)
+    if isinstance(raw_daily.columns, pd.MultiIndex):
+        raw_daily = raw_daily.loc[:, ~raw_daily.columns.duplicated()]
+        diag["yf_returned"] = int(raw_daily.columns.get_level_values(0).nunique())
     else:
-        st.session_state["last_run_ts"] = now_time
-        t0, base_diag = time.perf_counter(), diag_init()
-        
-        with st.status("⚡ 啟動雙榜單雷達與資料快取...", expanded=True) as status:
-            t = time.perf_counter(); meta, meta_errs = get_stock_list()
-            base_diag["t_meta"] = time.perf_counter() - t; base_diag["meta_count"] = len(meta)
-            for err in meta_errs: diag_err(base_diag, Exception(err), "META_ERR")
-            
-            t = time.perf_counter()
-            status.update(label="🔥 攔截市場成交量與漲幅雙榜單...", state="running")
-            top_tickers = fetch_strategic_tickers(base_diag) # ✅ 改用雙榜單擷取 120 檔
-            base_diag["t_rank"] = time.perf_counter() - t
-            base_diag["rank_count"] = len(top_tickers)
-            
-            if not top_tickers:
-                st.error("🚨 無法取得排行榜資料，請稍後再試。")
-                st.stop()
+        diag["yf_returned"] = 1
+    raw_daily = raw_daily.loc[~raw_daily.index.duplicated(keep="last")].sort_index()
 
-            filtered_meta = {k: v for k, v in meta.items() if k in top_tickers}
+    today_date = now_taipei().date()
+    features = {}
 
-            t = time.perf_counter(); now_ts = now_taipei()
-            # 抓取無過濾的原始富果資料 (包含智能限速，預計耗時 40~60 秒)
-            raw_fugle_df = fast_fugle_scan_raw(filtered_meta, status, base_diag, top_tickers)
-            base_diag["t_api"] = time.perf_counter() - t
-            base_diag["total_fetch_time"] = time.perf_counter() - t0
-            status.update(label="✅ 120 檔資料快取完成！(往後切換開關無需重載)", state="complete")
-            
-        # 將原始資料存入保險箱
-        st.session_state["raw_data_vault"] = {
-            "df": raw_fugle_df,
-            "meta": meta,
-            "ts": now_ts,
-            "base_diag": base_diag
+    for code in codes:
+        sym = symbol_of(code, meta_dict)
+        try:
+            df = _extract_symbol_frame(raw_daily, sym)
+            if df.empty or not {"Close", "Volume", "High", "Low", "Open"}.issubset(set(df.columns)):
+                diag["feature_fail"] += 1
+                continue
+            df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+            dates_tw = pd.Index([idx_date_taipei(x) for x in df.index])
+            past_df = df[dates_tw < today_date].copy()
+            if len(past_df) < 35:
+                diag["feature_fail"] += 1
+                continue
+
+            close = past_df["Close"].astype(float)
+            vol = past_df["Volume"].astype(float)
+            high = past_df["High"].astype(float)
+            low = past_df["Low"].astype(float)
+
+            vol_ma20 = safe_float(vol.rolling(20).mean().iloc[-1], 0.0)
+            high_52w = safe_float(high.tail(252).max(), 0.0)
+            board_streak = _consecutive_limit_ups(past_df, tail_n=12)
+            prev_close_hist = safe_float(close.iloc[-1], 0.0)
+            atr20 = safe_float((high - low).rolling(20).mean().iloc[-1], 0.0)
+            ret5 = safe_float((close.iloc[-1] / close.iloc[-6] - 1) * 100.0, 0.0) if len(close) >= 6 and close.iloc[-6] > 0 else 0.0
+            ret20 = safe_float((close.iloc[-1] / close.iloc[-21] - 1) * 100.0, 0.0) if len(close) >= 21 and close.iloc[-21] > 0 else 0.0
+
+            features[code] = {
+                "vol_ma20": vol_ma20,
+                "high_52w": high_52w,
+                "board_streak": board_streak,
+                "prev_close_hist": prev_close_hist,
+                "atr20": atr20,
+                "ret5": ret5,
+                "ret20": ret20,
+            }
+            diag["feature_ok"] += 1
+        except Exception as e:
+            diag["feature_fail"] += 1
+            diag_err(diag, e, "FEATURE")
+
+    diag["t_features"] = time.perf_counter() - t0
+    return features, raw_daily
+
+
+# ============================================================
+# 濾網（完全吃 vault，不重抓）
+# ============================================================
+def intraday_progress_fraction(now_ts):
+    m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
+    m = max(0, min(270, m))
+    if m <= 30:
+        return 0.12
+    if m <= 120:
+        return 0.12 + (0.50 - 0.12) * ((m - 30) / 90.0)
+    return min(1.0, 0.50 + (1.00 - 0.50) * ((m - 120) / 150.0))
+
+
+def get_thresholds(now_ts, is_test=False):
+    m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
+    m = max(0, min(270, m))
+    if is_test:
+        return {"dist_limit": 100.0, "vol_limit": 0, "pullback_lim": 1.0, "close_pos_min": 0.0, "vol_ratio_min": 0.0}
+    if m <= 60:
+        dist_limit = 3.2
+    elif m <= 180:
+        dist_limit = 2.2
+    else:
+        dist_limit = 1.5
+    return {
+        "dist_limit": dist_limit,
+        "vol_limit": 800_000,
+        "pullback_lim": 0.012 if m <= 90 else 0.0042,
+        "close_pos_min": 0.80,
+        "vol_ratio_min": 1.30,
+    }
+
+
+def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
+    diag = copy_diag(base_diag)
+    stats = {"候選總數": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "血統不足": [], "資訊不足": []}
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame(), stats, diag
+
+    th = get_thresholds(now_ts, is_test=is_test)
+    work = raw_df.copy()
+    if only_tse:
+        work = work[work["market"] == "TSE"].copy()
+
+    work = work[(work["dist"] <= th["dist_limit"]) & (work["vol_sh"] >= th["vol_limit"])].copy()
+    stats["候選總數"] = len(work)
+    if work.empty:
+        diag["final_count"] = 0
+        return pd.DataFrame(), stats, diag
+
+    frac = intraday_progress_fraction(now_ts)
+    out = []
+
+    for _, r in work.iterrows():
+        code = r["code"]
+        feat = feature_cache.get(code)
+        if not feat:
+            stats["資訊不足"].append(f"{code} {r['name']}")
+            diag["yf_fail"] += 1
+            continue
+
+        vol_ma20 = safe_float(feat.get("vol_ma20"), 0.0)
+        board_streak = safe_int(feat.get("board_streak"), 0)
+        high_52w = safe_float(feat.get("high_52w"), 0.0)
+        ret5 = safe_float(feat.get("ret5"), 0.0)
+        ret20 = safe_float(feat.get("ret20"), 0.0)
+
+        if vol_ma20 <= 0:
+            stats["資訊不足"].append(f"{code} {r['name']}")
+            diag["yf_fail"] += 1
+            continue
+
+        vol_ratio_live = r["vol_sh"] / max(vol_ma20 * (1.0 if is_test else frac), 1e-9)
+        if vol_ratio_live < th["vol_ratio_min"]:
+            stats["爆量不足"].append(f"{code} {r['name']}")
+            continue
+
+        rng = max(r["high"] - r["low"], 0.0)
+        pullback = (r["high"] - r["last"]) / max(r["high"], 1e-9)
+        close_pos = 1.0 if rng < 1e-9 else (r["last"] - r["low"]) / max(rng, 1e-9)
+
+        if pullback > th["pullback_lim"]:
+            stats["回落過大"].append(f"{code} {r['name']}")
+            continue
+        if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
+            stats["收盤太弱"].append(f"{code} {r['name']}")
+            continue
+        if use_bloodline and not is_test and board_streak < min_board:
+            stats["血統不足"].append(f"{code} {r['name']}")
+            continue
+
+        bid_price = safe_float(r.get("best_bid", 0.0), 0.0)
+        bid_size = safe_int(r.get("best_bid_size", 0), 0)
+        near_limit = r["last"] >= r["upper"] - tw_tick(r["upper"])
+        hard_locked = near_limit and bid_price >= r["upper"] - tw_tick(r["upper"]) and bid_size >= (80000 if r["last"] < 50 else 120000 if r["last"] < 100 else 200000)
+        proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
+
+        score = 0.0
+        score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.4))
+        score += min(3.0, max(0.0, vol_ratio_live - 1.0))
+        score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.85 else 0.0
+        score += min(2.0, board_streak * 0.9)
+        score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
+        score += 0.4 if ret5 > 0 else 0.0
+        score += 0.4 if ret20 > 0 else 0.0
+        signal_score = min(10.0, round(score, 2))
+
+        status = "🔒 鎖板排隊" if hard_locked else "🟣 板上臨界" if near_limit else "⚡ 強攻發動"
+        out.append(
+            {
+                "代號": code,
+                "名稱": r["name"],
+                "市場": market_label(r["market"]),
+                "現價": r["last"],
+                "距漲停%": r["dist"],
+                "爆量": vol_ratio_live,
+                "日內強度": signal_score,
+                "狀態": status,
+                "階段": f"歷史連板 {board_streak} 天",
+                "board_val": board_streak,
+                "close_pos": close_pos,
+                "pullback": pullback,
+                "52w接近%": proximity_52w,
+                "近5日%": ret5,
+                "近20日%": ret20,
+                "best_bid": bid_price,
+                "best_bid_size": bid_size,
+            }
+        )
+
+    res = pd.DataFrame(out)
+    if not res.empty:
+        res = res.sort_values(["日內強度", "board_val", "爆量", "距漲停%"], ascending=[False, False, False, True]).reset_index(drop=True)
+    diag["final_count"] = len(res)
+    return res, stats, diag
+
+
+# ============================================================
+# 日線替身驗證（誠實標示：非盤中逐秒真回測）
+# ============================================================
+def pick_backtest_universe(raw_df, top_n=16):
+    if raw_df is None or raw_df.empty:
+        return []
+    df = raw_df.sort_values(["dist", "vol_sh"], ascending=[True, False]).head(top_n)
+    return df["code"].tolist()
+
+
+def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=126, hold_days=5, use_bloodline=True, min_board=1):
+    trades = []
+    if raw_daily is None or getattr(raw_daily, "empty", False) or not universe_codes:
+        return pd.DataFrame(), {
+            "signals": 0,
+            "wins": 0,
+            "win_rate": 0.0,
+            "avg_return": 0.0,
+            "median_return": 0.0,
+            "best": 0.0,
+            "worst": 0.0,
         }
 
-# =========================
-# FILTER & RENDER PHASE (Instant)
-# =========================
-if "raw_data_vault" in st.session_state:
-    vault = st.session_state["raw_data_vault"]
-    
-    t_filter_start = time.perf_counter()
-    res, sts, final_diag = apply_dynamic_filters(
-        raw_df=vault["df"], 
-        meta_dict=vault["meta"], 
-        now_ts=vault["ts"], 
-        is_test=is_test, 
-        use_bloodline=use_bloodline, 
-        base_diag=vault["base_diag"]
+    for code in universe_codes:
+        if code not in meta_dict:
+            continue
+        sym = symbol_of(code, meta_dict)
+        df = _extract_symbol_frame(raw_daily, sym)
+        if df.empty or not {"Open", "High", "Low", "Close", "Volume"}.issubset(set(df.columns)):
+            continue
+        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+        if len(df) < max(70, lookback_days + hold_days + 5):
+            continue
+        df = df.tail(lookback_days + hold_days + 40).copy()
+        df["vol_ma20"] = df["Volume"].rolling(20).mean()
+        df["ret"] = df["Close"].pct_change()
+        df["prev_close"] = df["Close"].shift(1)
+        df["chg_pct"] = (df["Close"] / df["prev_close"] - 1.0) * 100.0
+        df["range"] = (df["High"] - df["Low"]).clip(lower=1e-9)
+        df["close_pos"] = (df["Close"] - df["Low"]) / df["range"]
+        df["vol_ratio"] = df["Volume"] / df["vol_ma20"]
+
+        board_list = [0] * len(df)
+        vals = df.reset_index(drop=False)
+        for i in range(1, len(vals)):
+            streak = 0
+            j = i
+            while j >= 1:
+                cp = safe_float(vals.loc[j, "Close"], 0.0)
+                pp = safe_float(vals.loc[j - 1, "Close"], 0.0)
+                if cp > 0 and pp > 0 and cp >= calc_limit_up(pp) - tw_tick(calc_limit_up(pp)):
+                    streak += 1
+                    j -= 1
+                else:
+                    break
+            board_list[i] = streak
+        df["board_streak"] = board_list
+
+        # 替身條件：接近你盤中戰情室的精神，但只用日線可取得欄位
+        signal = (
+            (df["chg_pct"] >= 7.0)
+            & (df["vol_ratio"] >= 1.8)
+            & (df["close_pos"] >= 0.80)
+        )
+        if use_bloodline:
+            signal &= df["board_streak"] >= min_board
+
+        sig_idx = df.index[signal.fillna(False)].tolist()
+        for idx in sig_idx:
+            pos = df.index.get_loc(idx)
+            if pos + 1 >= len(df):
+                continue
+            entry_idx = df.index[pos + 1]
+            exit_pos = min(pos + hold_days, len(df) - 1)
+            exit_idx = df.index[exit_pos]
+            entry = safe_float(df.loc[entry_idx, "Open"], 0.0)
+            exit_ = safe_float(df.loc[exit_idx, "Close"], 0.0)
+            if entry <= 0 or exit_ <= 0:
+                continue
+            ret = (exit_ / entry - 1.0) * 100.0
+            trades.append(
+                {
+                    "code": code,
+                    "name": meta_dict[code]["name"],
+                    "signal_date": str(pd.Timestamp(idx).date()),
+                    "entry_date": str(pd.Timestamp(entry_idx).date()),
+                    "exit_date": str(pd.Timestamp(exit_idx).date()),
+                    "entry": round(entry, 2),
+                    "exit": round(exit_, 2),
+                    "return_pct": round(ret, 2),
+                    "board_streak": int(df.loc[idx, "board_streak"]),
+                    "vol_ratio": round(safe_float(df.loc[idx, "vol_ratio"], 0.0), 2),
+                }
+            )
+
+    bt = pd.DataFrame(trades)
+    if bt.empty:
+        return bt, {
+            "signals": 0,
+            "wins": 0,
+            "win_rate": 0.0,
+            "avg_return": 0.0,
+            "median_return": 0.0,
+            "best": 0.0,
+            "worst": 0.0,
+        }
+
+    wins = int((bt["return_pct"] > 0).sum())
+    stats = {
+        "signals": int(len(bt)),
+        "wins": wins,
+        "win_rate": round(wins / len(bt) * 100.0, 1),
+        "avg_return": round(float(bt["return_pct"].mean()), 2),
+        "median_return": round(float(bt["return_pct"].median()), 2),
+        "best": round(float(bt["return_pct"].max()), 2),
+        "worst": round(float(bt["return_pct"].min()), 2),
+    }
+    bt = bt.sort_values(["signal_date", "return_pct"], ascending=[False, False]).reset_index(drop=True)
+    return bt, stats
+
+
+# ============================================================
+# UI
+# ============================================================
+st.set_page_config(page_title=APP_TITLE, page_icon="⚡", layout="wide", initial_sidebar_state="collapsed")
+
+st.markdown(
+    """
+<style>
+:root {
+    --bg0: #040506;
+    --bg1: #0a0d11;
+    --bg2: #10141b;
+    --line: rgba(255,255,255,0.06);
+    --line2: rgba(255,255,255,0.10);
+    --txt: #f8fafc;
+    --muted: #94a3b8;
+    --cyan: #38bdf8;
+    --violet: #a78bfa;
+    --green: #22c55e;
+    --gold: #f59e0b;
+    --rose: #fb7185;
+}
+[data-testid="stAppViewContainer"], .main {
+    background:
+        radial-gradient(circle at 10% 20%, rgba(56, 189, 248, 0.10), transparent 24%),
+        radial-gradient(circle at 85% 18%, rgba(167, 139, 250, 0.11), transparent 20%),
+        radial-gradient(circle at 40% 85%, rgba(34, 197, 94, 0.07), transparent 18%),
+        linear-gradient(180deg, #040506 0%, #080a0d 35%, #0b0f14 100%) !important;
+    color: var(--txt) !important;
+}
+.block-container {max-width: 1380px; padding-top: 1.6rem; padding-bottom: 3.0rem;}
+[data-testid="stSidebar"] {display: none !important;}
+.hero-wrap {
+    padding: 20px 0 14px 0;
+    margin-bottom: 8px;
+}
+.hero-title {
+    font-size: 60px;
+    line-height: 1.0;
+    font-weight: 950;
+    letter-spacing: -2.3px;
+    background: linear-gradient(135deg, #ffffff 0%, #b8dbff 35%, #c4b5fd 72%, #ffffff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.hero-sub {
+    margin-top: 10px;
+    color: #8ea2b8;
+    font-size: 14px;
+    letter-spacing: 1.1px;
+}
+.glass-row {
+    background: linear-gradient(180deg, rgba(17, 24, 39, 0.55), rgba(10, 15, 23, 0.74));
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 22px;
+    padding: 16px 18px;
+    backdrop-filter: blur(18px);
+    box-shadow: 0 18px 48px rgba(0,0,0,0.28);
+    margin-bottom: 14px;
+}
+.mini-kicker {
+    display:inline-block;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(56, 189, 248, 0.20);
+    color: #8bd6ff;
+    background: rgba(56, 189, 248, 0.08);
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+.card {
+    background: linear-gradient(160deg, rgba(17, 20, 26, 0.96), rgba(10, 12, 18, 0.94));
+    border: 1px solid rgba(255,255,255,0.06);
+    border-top: 1px solid rgba(255,255,255,0.12);
+    border-radius: 24px;
+    padding: 18px 18px 16px 18px;
+    min-height: 218px;
+    box-shadow: 0 18px 50px rgba(0,0,0,0.30);
+    transition: all .22s ease;
+}
+.card:hover {
+    transform: translateY(-4px);
+    border-color: rgba(56, 189, 248, 0.24);
+    box-shadow: 0 22px 56px rgba(56, 189, 248, 0.10);
+}
+.card-stage {
+    display:inline-block;
+    padding: 5px 12px;
+    border-radius: 999px;
+    color: #c4b5fd;
+    background: rgba(167, 139, 250, 0.10);
+    border: 1px solid rgba(167, 139, 250, 0.18);
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+.card-code {font-size: 22px; font-weight: 900; color: #ffffff; margin-top: 14px; letter-spacing: .5px;}
+.card-name {font-size: 14px; color: #9fb0c5; font-weight: 700; margin-top: 2px;}
+.card-price {font-size: 38px; font-weight: 950; color: #ffffff; margin-top: 14px; letter-spacing: -1px;}
+.card-status {font-size: 13px; color: #d8e3ef; font-weight: 700; margin-top: 10px;}
+.card-grid {display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px;}
+.stat-pill {
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.06);
+    padding: 10px 12px;
+    background: rgba(255,255,255,0.03);
+}
+.stat-k {font-size: 11px; color: #8ba2b8; font-weight: 700; letter-spacing: .8px;}
+.stat-v {font-size: 15px; color: #f8fafc; font-weight: 900; margin-top: 2px;}
+.fail-bag {margin: 6px 0 4px 0;}
+.fail-tag {
+    display: inline-block;
+    padding: 6px 10px;
+    margin: 4px 6px 0 0;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fecdd3;
+    background: rgba(251, 113, 133, 0.08);
+    border: 1px solid rgba(251, 113, 133, 0.16);
+}
+.soft-note {
+    color: #8da3ba;
+    font-size: 12px;
+    line-height: 1.6;
+}
+[data-testid="stMetric"] {
+    background: linear-gradient(180deg, rgba(13,18,24,0.72), rgba(10,12,18,0.90));
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 18px;
+    padding: 16px;
+}
+[data-testid="stMetricLabel"] {color: #8ea5bb !important; font-size: 13px !important; font-weight: 700 !important; letter-spacing: .6px;}
+[data-testid="stMetricValue"] {color: #f8fafc !important; font-size: 32px !important; font-weight: 950 !important;}
+.stButton>button {
+    width: 100% !important;
+    border: none !important;
+    border-radius: 18px !important;
+    min-height: 58px !important;
+    font-size: 18px !important;
+    font-weight: 950 !important;
+    letter-spacing: 1.2px !important;
+    color: #09111a !important;
+    background: linear-gradient(135deg, #ffffff 0%, #b8dbff 48%, #c4b5fd 100%) !important;
+    box-shadow: 0 16px 44px rgba(56, 189, 248, 0.16) !important;
+}
+.stButton>button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 22px 50px rgba(56, 189, 248, 0.22) !important;
+}
+[data-testid="stExpander"] {
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    border-radius: 18px !important;
+    background: rgba(10, 14, 20, 0.46) !important;
+}
+[data-testid="stExpander"] summary {
+    border-radius: 18px !important;
+    background: rgba(255,255,255,0.02) !important;
+}
+hr {
+    border: none;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    margin: 20px 0;
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+st.markdown(
+    f"""
+<div class="hero-wrap">
+  <div class="mini-kicker">MOMENTUM WAR ROOM</div>
+  <div class="hero-title">{APP_TITLE}</div>
+  <div class="hero-sub">{APP_SUBTITLE}</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+with st.container():
+    st.markdown('<div class="glass-row">', unsafe_allow_html=True)
+    cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns([1.1, 1.1, 1.0, 0.9, 1.0])
+    with cfg1:
+        is_test = st.toggle("🔥 寬鬆測試模式", value=False, help="關閉多數硬門檻，方便觀察候選池。")
+    with cfg2:
+        use_bloodline = st.toggle("🛡️ 連板血統濾網", value=True, help="要求歷史連板血統，減少雜訊股。")
+    with cfg3:
+        only_tse = st.toggle("🏛️ 只看上市", value=False, help="只顯示上市股票。")
+    with cfg4:
+        min_board = st.selectbox("血統門檻", options=[1, 2, 3], index=0)
+    with cfg5:
+        hold_days = st.selectbox("驗證持有天數", options=[3, 5, 7], index=1)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="glass-row">', unsafe_allow_html=True)
+launch_col, api_col = st.columns([1.5, 1.2])
+with launch_col:
+    launch = st.button("🚀 啟動官方快照狙擊 / 重建資料金庫")
+with api_col:
+    api_key = get_api_key()
+    if api_key:
+        st.success("✅ 已偵測到 Fugle API Key（來自 secrets / 環境變數）")
+    else:
+        st.warning("⚠️ 尚未偵測到 Fugle API Key，將無法使用官方快照。請在 Streamlit secrets 或環境變數設定 FUGLE_API_KEY。")
+st.markdown('</div>', unsafe_allow_html=True)
+
+now_epoch = time.time()
+last_run = st.session_state.get("last_run_ts", 0)
+
+if launch:
+    if not api_key:
+        st.error("🚨 找不到 Fugle API Key，請先設定後再啟動。")
+    elif now_epoch - last_run < DEFAULT_COOLDOWN_SECONDS:
+        remain = int(DEFAULT_COOLDOWN_SECONDS - (now_epoch - last_run))
+        st.warning(f"⏳ 冷卻保護中，請約 {remain} 秒後再重建資料金庫。")
+    else:
+        st.session_state["last_run_ts"] = now_epoch
+        base_diag = diag_init()
+        t_all = time.perf_counter()
+
+        with st.status("⚡ 準備系統與市場結構資料...", expanded=True) as status:
+            t0 = time.perf_counter()
+            meta, meta_errors = get_stock_list()
+            base_diag["t_meta"] = time.perf_counter() - t0
+            base_diag["meta_count"] = len(meta)
+            for e in meta_errors:
+                diag_err(base_diag, Exception(e), "META")
+
+            candidate_df = pd.DataFrame()
+            ranked_codes = []
+
+            try:
+                status.update(label="🌐 優先嘗試 Fugle 官方全市場快照...", state="running")
+                candidate_df, ranked_codes = fetch_market_snapshot_and_rank(meta, api_key, base_diag, status)
+            except Exception as e:
+                diag_err(base_diag, e, "SNAPSHOT_PRIMARY")
+                status.update(label="🟡 官方快照不可用，切換到公開榜單 + 逐檔 quote 備援...", state="running")
+                candidate_df, ranked_codes = fetch_candidate_rows_by_public_rank(meta, api_key, base_diag, status)
+
+            if candidate_df.empty:
+                status.update(label="❌ 無法取得候選資料，請檢查 API 權限或網路狀態。", state="error")
+                st.stop()
+
+            feature_cache, raw_daily = compute_feature_cache(candidate_df, meta, base_diag, status, period=f"{RAW_HISTORY_DAYS}d")
+
+            # 先用當前開關跑一次，挑 finalists 再補 quote 五檔資訊
+            now_ts = now_taipei()
+            pre_res, _, pre_diag = apply_dynamic_filters(
+                raw_df=candidate_df,
+                feature_cache=feature_cache,
+                now_ts=now_ts,
+                is_test=is_test,
+                use_bloodline=use_bloodline,
+                only_tse=only_tse,
+                min_board=min_board,
+                base_diag=base_diag,
+            )
+
+            enrich_codes = stable_unique(
+                (pre_res["代號"].head(FINAL_ENRICH_LIMIT).tolist() if not pre_res.empty else [])
+                + candidate_df.sort_values(["dist", "vol_sh"], ascending=[True, False])["code"].head(FINAL_ENRICH_LIMIT).tolist()
+            )[:FINAL_ENRICH_LIMIT]
+            if enrich_codes:
+                status.update(label="🧠 補強 finalists 五檔委買委賣資訊...", state="running")
+                t_enrich = time.perf_counter()
+                session = make_retry_session()
+                enrich_map = enrich_quotes_for_codes(session, api_key, enrich_codes, base_diag)
+                base_diag["t_enrich"] = time.perf_counter() - t_enrich
+                if enrich_map:
+                    for k, v in enrich_map.items():
+                        for field, value in v.items():
+                            candidate_df.loc[candidate_df["code"] == k, field] = value
+            else:
+                base_diag["t_enrich"] = 0.0
+
+            base_diag["total"] = time.perf_counter() - t_all
+            status.update(label="✅ 資料金庫建立完成。往後切換開關只重跑本地濾網，不重抓外部資料。", state="complete")
+
+        st.session_state["raw_data_vault_v12"] = {
+            "meta": meta,
+            "candidate_df": candidate_df,
+            "feature_cache": feature_cache,
+            "raw_daily": raw_daily,
+            "ranked_codes": ranked_codes,
+            "base_diag": base_diag,
+            "ts": now_taipei(),
+        }
+
+if "raw_data_vault_v12" in st.session_state:
+    vault = st.session_state["raw_data_vault_v12"]
+    t_filter = time.perf_counter()
+    res, stats, final_diag = apply_dynamic_filters(
+        raw_df=vault["candidate_df"],
+        feature_cache=vault["feature_cache"],
+        now_ts=vault["ts"],
+        is_test=is_test,
+        use_bloodline=use_bloodline,
+        only_tse=only_tse,
+        min_board=min_board,
+        base_diag=vault["base_diag"],
     )
-    final_diag["t_filter"] = time.perf_counter() - t_filter_start
-    
+    final_diag["t_filter"] = time.perf_counter() - t_filter
+
+    bt_t0 = time.perf_counter()
+    bt_universe = pick_backtest_universe(vault["candidate_df"], top_n=16)
+    bt_df, bt_stats = run_surrogate_backtest(
+        raw_daily=vault["raw_daily"],
+        universe_codes=bt_universe,
+        meta_dict=vault["meta"],
+        lookback_days=126,
+        hold_days=hold_days,
+        use_bloodline=use_bloodline,
+        min_board=min_board,
+    )
+    final_diag["t_backtest"] = time.perf_counter() - bt_t0
+
     ts = vault["ts"]
-    t_str = f"測試: {'ON' if is_test else 'OFF'} | 血統: {'ON' if use_bloodline else 'OFF'}"
-    st.markdown(f'<div class="status-caption">資料時間：{ts.strftime("%H:%M:%S")} | {t_str} | 濾網瞬切耗時：{final_diag["t_filter"]:.3f}s</div>', unsafe_allow_html=True)
-    
+    state_str = f"測試 {'ON' if is_test else 'OFF'} ｜ 血統 {'ON' if use_bloodline else 'OFF'} ｜ 上市限定 {'ON' if only_tse else 'OFF'}"
+    st.markdown(
+        f"<div class='soft-note'>資料時間：{ts.strftime('%Y-%m-%d %H:%M:%S')}（Asia/Taipei）｜{state_str}｜濾網瞬切：{final_diag['t_filter']:.3f}s</div>",
+        unsafe_allow_html=True,
+    )
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("排行榜捕捉數量", f"{final_diag.get('rank_count', 0)} 檔", f"來源: {final_diag.get('rank_src', '未知')}")
-    m2.metric("嚴選錄取檔數", len(res))
-    total_parse = final_diag.get("fugle_parse_ok", 0) + final_diag.get("fugle_parse_fail", 0)
-    m3.metric("API 解析良率", f"{(final_diag.get('fugle_parse_ok', 0)/max(1,total_parse)*100):.1f}%")
-    m4.metric("系統異常阻擋", final_diag.get("fugle_req_err",0) + final_diag.get("yf_fail",0) + final_diag.get("other_err",0))
+    m1.metric("候選池", f"{final_diag.get('candidate_count', 0)} 檔", f"來源：{final_diag.get('rank_src', '未知')}")
+    m2.metric("最終入選", f"{len(res)} 檔", f"快照成功：{final_diag.get('snapshot_ok', 0)}")
+    coverage = f"{final_diag.get('feature_ok', 0)} / {final_diag.get('candidate_count', 0)}"
+    m3.metric("歷史特徵覆蓋", coverage, f"YF 回傳：{final_diag.get('yf_returned', 0)}")
+    m4.metric("替身驗證勝率", f"{bt_stats['win_rate']}%", f"訊號：{bt_stats['signals']}")
 
-    with st.expander("⚙️ 系統診斷與底層監控 (白盒分析)", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Meta 總檔數", final_diag.get("meta_count"))
-        c2.metric("富果 API 有效", final_diag.get("fugle_parse_ok"))
-        st.caption(f"🛡️ 富果探針：HTTP 錯誤 {final_diag.get('fugle_http_err',0)}")
-        c3.metric("YF 數據覆蓋", f"{final_diag.get('yf_returned',0)} / {final_diag.get('yf_symbols',0)}")
-        rescue_msg = f"{'🟢 啟動' if final_diag.get('yf_rescue_used', 0) else '⚪ 待命'} | ERR {final_diag.get('other_err',0)}"
-        c4.metric("救援協議 / 錯誤", rescue_msg)
-        if final_diag.get('yf_rescue_used', 0):
-            st.caption(f"⚠️ 細胞分裂救援：成功 {final_diag.get('yf_parts_ok', 0)} 塊 / 失敗 {final_diag.get('yf_parts_fail', 0)} 塊")
-            
-        st.caption(f"全域耗時分布：Meta {final_diag['t_meta']:.2f}s | 榜單 {final_diag['t_rank']:.2f}s | 富果 API {final_diag['t_api']:.2f}s | 濾網瞬切 {final_diag['t_filter']:.3f}s")
-        if final_diag.get("last_errors"): st.code("\n".join(final_diag["last_errors"]))
+    with st.expander("⚙️ 系統診斷 / 白盒監控", expanded=False):
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Meta 檔數", final_diag.get("meta_count", 0))
+        d2.metric("快照市場成功", final_diag.get("snapshot_market_ok", 0))
+        d3.metric("五檔補強", f"{final_diag.get('quote_enrich_ok', 0)} / {final_diag.get('quote_enrich_ok', 0) + final_diag.get('quote_enrich_fail', 0)}")
+        d4.metric("濾網 / 驗證耗時", f"{final_diag['t_filter']:.3f}s / {final_diag['t_backtest']:.2f}s")
+        st.caption(
+            f"耗時分布：Meta {final_diag['t_meta']:.2f}s ｜ Snapshot+Rank {final_diag['t_rank']:.2f}s ｜ 歷史特徵 {final_diag['t_features']:.2f}s ｜ 五檔補強 {final_diag['t_enrich']:.2f}s ｜ Total {final_diag['total']:.2f}s"
+        )
+        st.caption(
+            f"YF 分段成功 {final_diag.get('yf_parts_ok', 0)} ｜ 失敗 {final_diag.get('yf_parts_fail', 0)} ｜ Feature fail {final_diag.get('feature_fail', 0)} ｜ Other err {final_diag.get('other_err', 0)}"
+        )
+        if final_diag.get("last_errors"):
+            st.code("\n".join(final_diag["last_errors"]))
 
-    with st.expander("🎯 戰損與淘汰名單 (實名點名)", expanded=True):
-        for reason, stocks in sts.items():
-            if isinstance(stocks, list) and stocks:
+    with st.expander("🎯 戰損與淘汰名單", expanded=True):
+        for reason, items in stats.items():
+            if isinstance(items, list) and items:
                 st.markdown(f"**{reason}**")
-                st.markdown(f'<div>' + "".join([f'<span class="fail-tag">{s}</span>' for s in stocks]) + '</div>', unsafe_allow_html=True)
+                st.markdown('<div class="fail-bag">' + ''.join([f'<span class="fail-tag">{x}</span>' for x in items]) + '</div>', unsafe_allow_html=True)
 
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("主力候選卡")
     if not res.empty:
-        st.markdown("<br>", unsafe_allow_html=True)
         cols = st.columns(4)
-        for i, r in res.iterrows():
+        for i, row in res.iterrows():
             with cols[i % 4]:
-                st.markdown(f"""<div class="pro-card">
-                    <div class="tag-pro">{r['階段']}</div>
-                    <div class="stock-name">{r['代號']} {r['名稱']}</div>
-                    <div style="height:12px;"></div>
-                    <div class="price-large">{r['現價']:.2f}</div>
-                    <div style="font-size:13px; color:#94a3b8; margin-top:12px; font-weight:600;">
-                        {r['狀態']} | 動能 {r['爆量']:.1f}x
-                    </div>
-                </div>""", unsafe_allow_html=True)
-    else: 
-        if final_diag.get("fugle_parse_ok", 0) == 0:
-            st.error("🚨 嚴重警告：無法連接到富果 API。請確認您的授權金鑰是否有效。")
+                st.markdown(
+                    f"""
+<div class="card">
+  <div class="card-stage">{row['階段']}</div>
+  <div class="card-code">{row['代號']}</div>
+  <div class="card-name">{row['名稱']} ｜ {row['市場']}</div>
+  <div class="card-price">{row['現價']:.2f}</div>
+  <div class="card-status">{row['狀態']}</div>
+  <div class="card-grid">
+    <div class="stat-pill"><div class="stat-k">日內強度</div><div class="stat-v">{row['日內強度']:.2f}</div></div>
+    <div class="stat-pill"><div class="stat-k">爆量倍率</div><div class="stat-v">{row['爆量']:.2f}x</div></div>
+    <div class="stat-pill"><div class="stat-k">距漲停</div><div class="stat-v">{row['距漲停%']:.2f}%</div></div>
+    <div class="stat-pill"><div class="stat-k">52W 接近</div><div class="stat-v">{row['52w接近%']:.1f}%</div></div>
+  </div>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+    else:
+        st.warning("⚠️ 當前設定下沒有標的通過濾網。你可以先打開『寬鬆測試模式』看候選池，再反推門檻。")
+
+    with st.expander("🧪 替身驗證面板（近 126 交易日）", expanded=False):
+        st.caption("這裡是日線替身驗證，不是盤中逐秒真回測。用途是檢查你的濾網精神在近期市場是否有訊號品質，而不是保證實盤績效。")
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("訊號數", bt_stats["signals"])
+        b2.metric("勝率", f"{bt_stats['win_rate']}%")
+        b3.metric("平均報酬", f"{bt_stats['avg_return']}%")
+        b4.metric("中位數", f"{bt_stats['median_return']}%")
+        b5.metric("最佳 / 最差", f"{bt_stats['best']}% / {bt_stats['worst']}%")
+        if not bt_df.empty:
+            st.dataframe(bt_df, use_container_width=True, hide_index=True)
         else:
-            st.warning("⚠️ 目前無標的通過您當前設定的濾網條件，請嘗試切換上方的「寬鬆測試模式」。")
+            st.info("目前替身驗證沒有產生足夠訊號，常見原因是血統濾網太嚴、候選池太窄，或近 126 日這批股票沒有足夠符合條件的事件。")
+
+else:
+    st.info("先按上方按鈕建立資料金庫，之後切換濾網才會進入真正的瞬切模式。")
