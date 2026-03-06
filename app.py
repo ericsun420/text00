@@ -22,6 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ============================================================
 APP_TITLE = "起漲戰情室 OMEGA"
 APP_SUBTITLE = "v12.0 真瞬切版｜官方快照優先｜雙榜狙擊｜內建驗證"
+FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
 RAW_HISTORY_DAYS = 420
@@ -272,6 +273,8 @@ def get_api_key():
         key = ""
     if not key:
         key = os.getenv("FUGLE_API_KEY", "")
+    if not key:
+        key = FUGLE_API_KEY
     return str(key).strip()
 
 
