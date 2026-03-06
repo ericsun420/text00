@@ -183,12 +183,19 @@ def now_taipei():
 
 
 def idx_date_taipei(idx):
+    """將各種時間索引安全轉成台北日期物件。"""
     try:
-        if getattr(idx, "tz", None) is not None:
-            return idx.tz_convert("Asia/Taipei").date
+        ts = pd.Timestamp(idx)
+        if getattr(ts, "tzinfo", None) is not None:
+            ts = ts.tz_convert("Asia/Taipei")
+        return ts.date()
     except Exception:
-        pass
-    return idx.date
+        try:
+            if getattr(idx, "tz", None) is not None:
+                return idx.tz_convert("Asia/Taipei").date()
+        except Exception:
+            pass
+        return pd.Timestamp(idx).date()
 
 
 def tw_tick(price):
@@ -988,6 +995,59 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
     return bt, stats
 
 
+def make_backtest_display(bt_df: pd.DataFrame):
+    if bt_df is None or bt_df.empty:
+        return bt_df, None
+
+    display_df = bt_df.rename(
+        columns={
+            "code": "代號",
+            "name": "名稱",
+            "signal_date": "訊號日",
+            "entry_date": "進場日",
+            "exit_date": "出場日",
+            "entry": "進場價",
+            "exit": "出場價",
+            "return_pct": "報酬率%",
+            "board_streak": "連板血統",
+            "vol_ratio": "爆量倍率",
+        }
+    ).copy()
+
+    display_df = display_df[["代號", "名稱", "訊號日", "進場日", "出場日", "進場價", "出場價", "報酬率%", "連板血統", "爆量倍率"]]
+
+    def ret_style(v):
+        if pd.isna(v):
+            return ""
+        if v >= 6:
+            return "color:#ecfdf5;background:rgba(34,197,94,0.24);font-weight:900;"
+        if v > 0:
+            return "color:#bbf7d0;background:rgba(34,197,94,0.14);font-weight:800;"
+        if v <= -6:
+            return "color:#fff1f2;background:rgba(251,113,133,0.24);font-weight:900;"
+        if v < 0:
+            return "color:#fecdd3;background:rgba(251,113,133,0.14);font-weight:800;"
+        return "color:#e2e8f0;font-weight:800;"
+
+    styler = (
+        display_df.style
+        .format({"進場價": "{:.2f}", "出場價": "{:.2f}", "報酬率%": "{:+.2f}%", "爆量倍率": "{:.2f}x"})
+        .map(ret_style, subset=["報酬率%"])
+        .set_properties(**{
+            "background": "rgba(9,14,22,0.88)",
+            "color": "#e5eef8",
+            "border-color": "rgba(255,255,255,0.06)",
+            "font-size": "13px",
+        })
+        .set_table_styles([
+            {"selector": "th", "props": [("background", "rgba(255,255,255,0.04)"), ("color", "#9fb3c8"), ("font-weight", "800"), ("border", "1px solid rgba(255,255,255,0.06)")]},
+            {"selector": "td", "props": [("border", "1px solid rgba(255,255,255,0.05)")]},
+            {"selector": "table", "props": [("border-collapse", "collapse"), ("border-radius", "14px"), ("overflow", "hidden")]},
+        ])
+    )
+    return display_df, styler
+
+
 # ============================================================
 # UI
 # ============================================================
@@ -1150,6 +1210,16 @@ st.markdown(
 [data-testid="stExpander"] summary {
     border-radius: 18px !important;
     background: rgba(255,255,255,0.02) !important;
+}
+[data-testid="stDataFrame"] {
+    border: 1px solid rgba(255,255,255,0.08) !important;
+    border-radius: 18px !important;
+    overflow: hidden !important;
+    background: linear-gradient(180deg, rgba(10,14,20,0.78), rgba(8,11,16,0.95)) !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03), 0 14px 40px rgba(0,0,0,0.22) !important;
+}
+[data-testid="stDataFrame"] [role="grid"] {
+    background: transparent !important;
 }
 hr {
     border: none;
@@ -1382,7 +1452,9 @@ if "raw_data_vault_v12" in st.session_state:
         b4.metric("中位數", f"{bt_stats['median_return']}%")
         b5.metric("最佳 / 最差", f"{bt_stats['best']}% / {bt_stats['worst']}%")
         if not bt_df.empty:
-            st.dataframe(bt_df, use_container_width=True, hide_index=True)
+            bt_show, bt_styler = make_backtest_display(bt_df)
+            st.dataframe(bt_styler, use_container_width=True, hide_index=True, height=420)
+            st.caption("報酬率綠色代表較佳，紅色代表較弱；表格已改成戰情室深色樣式，閱讀會比預設表格乾淨很多。")
         else:
             st.info("目前替身驗證沒有產生足夠訊號，常見原因是血統濾網太嚴、候選池太窄，或近 126 日這批股票沒有足夠符合條件的事件。")
 
