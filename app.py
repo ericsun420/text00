@@ -754,9 +754,253 @@ def render_star_bar(stars):
     return "★" * stars + "☆" * (5 - stars)
 
 
+def compute_feature_from_history(df, today_date):
+    if df is None or getattr(df, "empty", False):
+        return None
+    if not {"Close", "Volume", "High", "Low", "Open"}.issubset(set(df.columns)):
+        return None
+    df = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+    if df.empty:
+        return None
+    dates_tw = pd.Index([idx_date_taipei(x) for x in df.index])
+    past_df = df[dates_tw < today_date].copy()
+    if len(past_df) < 35:
+        return None
+
+    close = past_df["Close"].astype(float)
+    vol = past_df["Volume"].astype(float)
+    high = past_df["High"].astype(float)
+    low = past_df["Low"].astype(float)
+    return {
+        "vol_ma20": safe_float(vol.rolling(20).mean().iloc[-1], 0.0),
+        "high_52w": safe_float(high.tail(252).max(), 0.0),
+        "board_streak": _consecutive_limit_ups(past_df, tail_n=12),
+        "prev_close_hist": safe_float(close.iloc[-1], 0.0),
+        "atr20": safe_float((high - low).rolling(20).mean().iloc[-1], 0.0),
+        "ret5": safe_float((close.iloc[-1] / close.iloc[-6] - 1) * 100.0, 0.0) if len(close) >= 6 and close.iloc[-6] > 0 else 0.0,
+        "ret20": safe_float((close.iloc[-1] / close.iloc[-21] - 1) * 100.0, 0.0) if len(close) >= 21 and close.iloc[-21] > 0 else 0.0,
+    }
+
+
+def resolve_stock_query(query, meta_dict):
+    q = str(query or "").strip()
+    if not q:
+        return None, []
+    nq = re.sub(r"\s+", "", q).upper()
+    if nq.isdigit() and len(nq) == 4 and nq in meta_dict:
+        return nq, []
+
+    exact_name = [code for code, info in meta_dict.items() if re.sub(r"\s+", "", str(info.get("name", ""))).upper() == nq]
+    if len(exact_name) == 1:
+        return exact_name[0], []
+
+    prefix = []
+    partial = []
+    for code, info in meta_dict.items():
+        name_norm = re.sub(r"\s+", "", str(info.get("name", ""))).upper()
+        if code.startswith(nq) or name_norm.startswith(nq):
+            prefix.append(code)
+        elif nq in code or nq in name_norm:
+            partial.append(code)
+    matches = stable_unique(exact_name + prefix + partial)
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches[:8]
+
+
+def fetch_single_quote_row(session, api_key, code, meta_dict):
+    r = fugle_get_json(session, f"intraday/quote/{code}", api_key)
+    if r.status_code != 200:
+        raise RuntimeError(f"QUOTE_{code}_{r.status_code}")
+    j = r.json()
+    ref = safe_float(j.get("referencePrice"), 0.0)
+    last = safe_float(j.get("closePrice"), ref)
+    high = safe_float(j.get("highPrice"), last)
+    low = safe_float(j.get("lowPrice"), last)
+    open_ = safe_float(j.get("openPrice"), ref)
+    vol = safe_int((j.get("total") or {}).get("tradeVolume"), 0)
+    bids = j.get("bids", []) or []
+    asks = j.get("asks", []) or []
+    best_bid = safe_float(bids[0].get("price"), 0.0) if bids else 0.0
+    best_bid_size = safe_int(bids[0].get("size"), 0) if bids else 0
+    best_ask = safe_float(asks[0].get("price"), 0.0) if asks else 0.0
+    best_ask_size = safe_int(asks[0].get("size"), 0) if asks else 0
+    if ref <= 0 or last <= 0:
+        raise RuntimeError(f"QUOTE_{code}_EMPTY")
+    upper = calc_limit_up(ref)
+    return {
+        "code": code,
+        "name": meta_dict[code]["name"],
+        "market": market_of(code, meta_dict),
+        "open": open_,
+        "high": high,
+        "low": low,
+        "last": last,
+        "vol_sh": vol,
+        "trade_value": 0.0,
+        "change": last - ref,
+        "change_pct": ((last - ref) / ref * 100.0) if ref else 0.0,
+        "prev_close": ref,
+        "upper": upper,
+        "dist": max(0.0, (upper - last) / max(upper, 1e-9) * 100.0),
+        "last_updated": 0,
+        "best_bid": best_bid,
+        "best_bid_size": best_bid_size,
+        "best_ask": best_ask,
+        "best_ask_size": best_ask_size,
+        "rank_order": 9999,
+    }
+
+
+def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse, min_board):
+    code = r["code"]
+    name = r["name"]
+    market = r.get("market", "TSE")
+    if only_tse and market != "TSE":
+        return {"passed": False, "reason_key": "市場不符", "reason_text": "目前設定只看上市", "item": None}
+    if not feat:
+        return {"passed": False, "reason_key": "資訊不足", "reason_text": "缺少歷史特徵資料", "item": None}
+
+    vol_ma20 = safe_float(feat.get("vol_ma20"), 0.0)
+    board_streak = safe_int(feat.get("board_streak"), 0)
+    high_52w = safe_float(feat.get("high_52w"), 0.0)
+    ret5 = safe_float(feat.get("ret5"), 0.0)
+    ret20 = safe_float(feat.get("ret20"), 0.0)
+    if vol_ma20 <= 0:
+        return {"passed": False, "reason_key": "資訊不足", "reason_text": "20 日均量資料不足", "item": None}
+
+    th = get_thresholds(now_ts, is_test=is_test)
+    frac = intraday_progress_fraction(now_ts)
+    vol_ratio_live = r["vol_sh"] / max(vol_ma20 * (1.0 if is_test else frac), 1e-9)
+    rng = max(r["high"] - r["low"], 0.0)
+    pullback = (r["high"] - r["last"]) / max(r["high"], 1e-9)
+    close_pos = 1.0 if rng < 1e-9 else (r["last"] - r["low"]) / max(rng, 1e-9)
+
+    bid_price = safe_float(r.get("best_bid", 0.0), 0.0)
+    bid_size = safe_int(r.get("best_bid_size", 0), 0)
+    near_limit = r["last"] >= r["upper"] - tw_tick(r["upper"])
+    hard_locked = near_limit and bid_price >= r["upper"] - tw_tick(r["upper"]) and bid_size >= (80000 if r["last"] < 50 else 120000 if r["last"] < 100 else 200000)
+    proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
+
+    score = 0.0
+    score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.4))
+    score += min(3.0, max(0.0, vol_ratio_live - 1.0))
+    score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.85 else 0.0
+    score += min(2.0, board_streak * 0.9)
+    score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
+    score += 0.4 if ret5 > 0 else 0.0
+    score += 0.4 if ret20 > 0 else 0.0
+    signal_score = min(10.0, round(score, 2))
+
+    status = "🔒 鎖板排隊" if hard_locked else "🟣 板上臨界" if near_limit else "⚡ 強攻發動"
+    star_count = score_to_star_count(
+        signal_score=signal_score,
+        dist_pct=r["dist"],
+        vol_ratio=vol_ratio_live,
+        board_streak=board_streak,
+        close_pos=close_pos,
+        proximity_52w=proximity_52w,
+        status_text=status,
+    )
+    item = {
+        "代號": code,
+        "名稱": name,
+        "市場": market_label(market),
+        "現價": r["last"],
+        "距漲停%": r["dist"],
+        "爆量": vol_ratio_live,
+        "日內強度": signal_score,
+        "推薦星等": star_count,
+        "推薦指數": render_star_bar(star_count),
+        "狀態": status,
+        "階段": f"歷史連板 {board_streak} 天",
+        "board_val": board_streak,
+        "close_pos": close_pos,
+        "pullback": pullback,
+        "52w接近%": proximity_52w,
+        "近5日%": ret5,
+        "近20日%": ret20,
+        "best_bid": bid_price,
+        "best_bid_size": bid_size,
+        "best_ask": safe_float(r.get("best_ask", 0.0), 0.0),
+        "best_ask_size": safe_int(r.get("best_ask_size", 0), 0),
+        "成交量": safe_int(r.get("vol_sh", 0), 0),
+    }
+
+    if r["dist"] > th["dist_limit"] or r["vol_sh"] < th["vol_limit"]:
+        return {"passed": False, "reason_key": "候選池外", "reason_text": "未進入當前候選池條件", "item": item}
+    if vol_ratio_live < th["vol_ratio_min"]:
+        return {"passed": False, "reason_key": "爆量不足", "reason_text": "即時量能未達門檻", "item": item}
+    if pullback > th["pullback_lim"]:
+        return {"passed": False, "reason_key": "回落過大", "reason_text": "高檔回落幅度過大", "item": item}
+    if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
+        return {"passed": False, "reason_key": "收盤太弱", "reason_text": "收在日內相對弱勢位置", "item": item}
+    if use_bloodline and not is_test and board_streak < min_board:
+        return {"passed": False, "reason_key": "血統不足", "reason_text": f"歷史連板未達 {min_board} 天", "item": item}
+    return {"passed": True, "reason_key": "通過", "reason_text": "通過當前濾網", "item": item}
+
+
+def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_bloodline, min_board, vault=None):
+    code, matches = resolve_stock_query(query, meta_dict)
+    if not code:
+        if matches:
+            return {
+                "ok": False,
+                "kind": "ambiguous",
+                "message": "找到多個可能標的，請改輸入更完整代號或名稱。",
+                "matches": [{"code": c, "name": meta_dict[c]["name"], "market": market_label(meta_dict[c]["market"])} for c in matches],
+            }
+        return {"ok": False, "kind": "not_found", "message": "找不到對應股票，請輸入正確代號或名稱。", "matches": []}
+
+    row = None
+    feat = None
+    source = []
+    if vault:
+        cdf = vault.get("candidate_df")
+        if cdf is not None and not getattr(cdf, "empty", False):
+            hit = cdf[cdf["code"] == code]
+            if not hit.empty:
+                row = hit.iloc[0].to_dict()
+                source.append("資料金庫快照")
+        feat = (vault.get("feature_cache") or {}).get(code)
+        if feat:
+            source.append("資料金庫特徵")
+
+    if row is None:
+        session = make_retry_session()
+        row = fetch_single_quote_row(session, api_key, code, meta_dict)
+        source.append("即時 quote")
+
+    if feat is None:
+        sym = symbol_of(code, meta_dict)
+        raw_daily = yf_download_daily([sym], period=f"{RAW_HISTORY_DAYS}d")
+        df = _extract_symbol_frame(raw_daily, sym)
+        feat = compute_feature_from_history(df, now_ts.date())
+        source.append("單檔歷史")
+
+    assessment = evaluate_candidate_record(
+        r=row,
+        feat=feat,
+        now_ts=now_ts,
+        is_test=is_test,
+        use_bloodline=use_bloodline,
+        only_tse=False,
+        min_board=min_board,
+    )
+    return {
+        "ok": True,
+        "kind": "result",
+        "code": code,
+        "name": meta_dict[code]["name"],
+        "market": market_label(meta_dict[code]["market"]),
+        "assessment": assessment,
+        "source": " / ".join(source),
+    }
+
+
 def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
     diag = copy_diag(base_diag)
-    stats = {"候選總數": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "血統不足": [], "資訊不足": []}
+    stats = {"候選總數": 0, "爆量不足": [], "回落過大": [], "收盤太弱": [], "血統不足": [], "資訊不足": [], "候選池外": [], "市場不符": []}
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(), stats, diag
 
@@ -771,103 +1015,26 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         diag["final_count"] = 0
         return pd.DataFrame(), stats, diag
 
-    frac = intraday_progress_fraction(now_ts)
     out = []
-
     for _, r in work.iterrows():
-        code = r["code"]
-        feat = feature_cache.get(code)
-        if not feat:
-            stats["資訊不足"].append(f"{code} {r['name']}")
-            diag["yf_fail"] += 1
-            continue
-
-        vol_ma20 = safe_float(feat.get("vol_ma20"), 0.0)
-        board_streak = safe_int(feat.get("board_streak"), 0)
-        high_52w = safe_float(feat.get("high_52w"), 0.0)
-        ret5 = safe_float(feat.get("ret5"), 0.0)
-        ret20 = safe_float(feat.get("ret20"), 0.0)
-
-        if vol_ma20 <= 0:
-            stats["資訊不足"].append(f"{code} {r['name']}")
-            diag["yf_fail"] += 1
-            continue
-
-        vol_ratio_live = r["vol_sh"] / max(vol_ma20 * (1.0 if is_test else frac), 1e-9)
-        if vol_ratio_live < th["vol_ratio_min"]:
-            stats["爆量不足"].append(f"{code} {r['name']}")
-            continue
-
-        rng = max(r["high"] - r["low"], 0.0)
-        pullback = (r["high"] - r["last"]) / max(r["high"], 1e-9)
-        close_pos = 1.0 if rng < 1e-9 else (r["last"] - r["low"]) / max(rng, 1e-9)
-
-        if pullback > th["pullback_lim"]:
-            stats["回落過大"].append(f"{code} {r['name']}")
-            continue
-        if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
-            stats["收盤太弱"].append(f"{code} {r['name']}")
-            continue
-        if use_bloodline and not is_test and board_streak < min_board:
-            stats["血統不足"].append(f"{code} {r['name']}")
-            continue
-
-        bid_price = safe_float(r.get("best_bid", 0.0), 0.0)
-        bid_size = safe_int(r.get("best_bid_size", 0), 0)
-        near_limit = r["last"] >= r["upper"] - tw_tick(r["upper"])
-        hard_locked = near_limit and bid_price >= r["upper"] - tw_tick(r["upper"]) and bid_size >= (80000 if r["last"] < 50 else 120000 if r["last"] < 100 else 200000)
-        proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
-
-        score = 0.0
-        score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.4))
-        score += min(3.0, max(0.0, vol_ratio_live - 1.0))
-        score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.85 else 0.0
-        score += min(2.0, board_streak * 0.9)
-        score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
-        score += 0.4 if ret5 > 0 else 0.0
-        score += 0.4 if ret20 > 0 else 0.0
-        signal_score = min(10.0, round(score, 2))
-
-        status = "🔒 鎖板排隊" if hard_locked else "🟣 板上臨界" if near_limit else "⚡ 強攻發動"
-        out.append(
-            {
-                "代號": code,
-                "名稱": r["name"],
-                "市場": market_label(r["market"]),
-                "現價": r["last"],
-                "距漲停%": r["dist"],
-                "爆量": vol_ratio_live,
-                "日內強度": signal_score,
-                "推薦星等": score_to_star_count(
-                    signal_score=signal_score,
-                    dist_pct=r["dist"],
-                    vol_ratio=vol_ratio_live,
-                    board_streak=board_streak,
-                    close_pos=close_pos,
-                    proximity_52w=proximity_52w,
-                    status_text=status,
-                ),
-                "推薦指數": render_star_bar(score_to_star_count(
-                    signal_score=signal_score,
-                    dist_pct=r["dist"],
-                    vol_ratio=vol_ratio_live,
-                    board_streak=board_streak,
-                    close_pos=close_pos,
-                    proximity_52w=proximity_52w,
-                    status_text=status,
-                )),
-                "狀態": status,
-                "階段": f"歷史連板 {board_streak} 天",
-                "board_val": board_streak,
-                "close_pos": close_pos,
-                "pullback": pullback,
-                "52w接近%": proximity_52w,
-                "近5日%": ret5,
-                "近20日%": ret20,
-                "best_bid": bid_price,
-                "best_bid_size": bid_size,
-            }
+        assessment = evaluate_candidate_record(
+            r=r,
+            feat=feature_cache.get(r["code"]),
+            now_ts=now_ts,
+            is_test=is_test,
+            use_bloodline=use_bloodline,
+            only_tse=only_tse,
+            min_board=min_board,
         )
+        if not assessment.get("passed"):
+            reason_key = assessment.get("reason_key", "資訊不足")
+            if reason_key not in stats:
+                stats[reason_key] = []
+            stats[reason_key].append(f"{r['code']} {r['name']}")
+            if reason_key == "資訊不足":
+                diag["yf_fail"] += 1
+            continue
+        out.append(assessment["item"])
 
     res = pd.DataFrame(out)
     if not res.empty:
@@ -1094,6 +1261,72 @@ def render_backtest_table(display_df: pd.DataFrame):
     st.markdown(table_html, unsafe_allow_html=True)
 
 
+def render_search_result_box(search_result):
+    if not search_result:
+        return
+    if not search_result.get("ok"):
+        kind = search_result.get("kind")
+        if kind == "ambiguous":
+            tags = ''.join([
+                f"<span class='fail-tag'>{html.escape(m['code'])} {html.escape(m['name'])}｜{html.escape(m['market'])}</span>"
+                for m in search_result.get("matches", [])
+            ])
+            st.markdown(
+                f"<div class='search-panel'><div class='search-head'>獨立搜尋結果</div><div class='search-bad'>{html.escape(search_result.get('message', ''))}</div><div class='fail-bag'>{tags}</div></div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div class='search-panel'><div class='search-head'>獨立搜尋結果</div><div class='search-bad'>{html.escape(search_result.get('message', ''))}</div></div>",
+                unsafe_allow_html=True,
+            )
+        return
+
+    assess = search_result.get("assessment") or {}
+    item = assess.get("item") or {}
+    if not item:
+        st.markdown(
+            f"<div class='search-panel'><div class='search-head'>獨立搜尋結果</div><div class='search-bad'>{html.escape(assess.get('reason_text', '資料不足，無法評分。'))}</div></div>",
+            unsafe_allow_html=True,
+        )
+        return
+
+    passed = assess.get("passed", False)
+    badge_cls = "search-good" if passed else "search-warn"
+    badge_text = "通過當前濾網" if passed else f"未通過｜{assess.get('reason_text', '未達條件')}"
+    html_block = f"""
+    <div class='search-panel'>
+      <div class='search-head-row'>
+        <div>
+          <div class='search-head'>獨立搜尋評分</div>
+          <div class='search-source'>來源：{html.escape(search_result.get('source', ''))}</div>
+        </div>
+        <div class='{badge_cls}'>{html.escape(badge_text)}</div>
+      </div>
+      <div class='card search-card'>
+        <div class='card-stage'>{html.escape(item.get('階段', ''))}</div>
+        <div class='card-code'>{html.escape(str(item.get('代號', '')))}</div>
+        <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))}</div>
+        <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
+        <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
+        <div class='card-stars-wrap'>
+          <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
+          <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
+        </div>
+        <div class='card-grid'>
+          <div class='stat-pill'><div class='stat-k'>日內強度</div><div class='stat-v'>{safe_float(item.get('日內強度', 0.0), 0.0):.2f}</div></div>
+          <div class='stat-pill'><div class='stat-k'>爆量倍率</div><div class='stat-v'>{safe_float(item.get('爆量', 0.0), 0.0):.2f}x</div></div>
+          <div class='stat-pill'><div class='stat-k'>距漲停</div><div class='stat-v'>{safe_float(item.get('距漲停%', 0.0), 0.0):.2f}%</div></div>
+          <div class='stat-pill'><div class='stat-k'>52W 接近</div><div class='stat-v'>{safe_float(item.get('52w接近%', 0.0), 0.0):.1f}%</div></div>
+          <div class='stat-pill'><div class='stat-k'>近 5 日</div><div class='stat-v'>{safe_float(item.get('近5日%', 0.0), 0.0):+.2f}%</div></div>
+          <div class='stat-pill'><div class='stat-k'>近 20 日</div><div class='stat-v'>{safe_float(item.get('近20日%', 0.0), 0.0):+.2f}%</div></div>
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(html_block, unsafe_allow_html=True)
+
+
 # ============================================================
 # UI
 # ============================================================
@@ -1154,6 +1387,24 @@ st.markdown(
     box-shadow: 0 18px 48px rgba(0,0,0,0.28);
     margin-bottom: 14px;
 }
+.search-panel {
+    background: linear-gradient(180deg, rgba(12,17,25,0.84), rgba(8,12,18,0.95));
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 22px;
+    padding: 18px;
+    box-shadow: 0 18px 48px rgba(0,0,0,0.24);
+    margin-bottom: 14px;
+}
+.search-head-row {display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px;}
+.search-head {font-size:18px; font-weight:900; color:#f8fafc; letter-spacing:.3px;}
+.search-source {font-size:12px; color:#8ea5bb; margin-top:6px;}
+.search-good, .search-warn, .search-bad {
+    border-radius: 999px; padding: 7px 12px; font-size: 12px; font-weight: 900; display:inline-flex; align-items:center;
+}
+.search-good {background: rgba(34,197,94,0.14); color:#bbf7d0; border:1px solid rgba(34,197,94,0.22);}
+.search-warn {background: rgba(245,158,11,0.14); color:#fde68a; border:1px solid rgba(245,158,11,0.22);}
+.search-bad {background: rgba(251,113,133,0.12); color:#fecdd3; border:1px solid rgba(251,113,133,0.18); display:inline-flex; margin-top:8px;}
+.search-card {min-height: unset;}
 .mini-kicker {
     display:inline-block;
     padding: 6px 12px;
@@ -1391,6 +1642,63 @@ with api_col:
     else:
         st.warning("⚠️ 尚未偵測到 Fugle API Key，將無法使用官方快照。")
 st.markdown('</div>', unsafe_allow_html=True)
+
+st.markdown('<div class="glass-row">', unsafe_allow_html=True)
+search_col, search_btn_col = st.columns([3.6, 1.2])
+with search_col:
+    search_query = st.text_input(
+        "獨立搜尋",
+        value=st.session_state.get("independent_search_query", ""),
+        placeholder="輸入股票代號或名稱，例如 8299、群聯、華邦電",
+        help="不受候選池限制，直接指定個股做同一套系統評分。",
+        label_visibility="collapsed",
+    )
+with search_btn_col:
+    search_launch = st.button("🔎 搜尋個股評分", use_container_width=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+if search_launch:
+    st.session_state["independent_search_query"] = search_query
+    api_key_search = get_api_key()
+    meta_search, meta_errors = get_stock_list()
+    if not api_key_search:
+        st.session_state["independent_search_result"] = {
+            "ok": False,
+            "kind": "not_found",
+            "message": "找不到 Fugle API Key，無法執行獨立搜尋評分。",
+            "matches": [],
+        }
+    elif not meta_search:
+        st.session_state["independent_search_result"] = {
+            "ok": False,
+            "kind": "not_found",
+            "message": "股票主檔讀取失敗，請稍後再試。",
+            "matches": [],
+        }
+    else:
+        try:
+            with st.status("🔎 搜尋指定個股並套用同一套評分模型...", expanded=False):
+                st.session_state["independent_search_result"] = evaluate_single_search(
+                    query=search_query,
+                    meta_dict=meta_search,
+                    api_key=api_key_search,
+                    now_ts=now_taipei(),
+                    is_test=is_test,
+                    use_bloodline=use_bloodline,
+                    min_board=min_board,
+                    vault=st.session_state.get("raw_data_vault_v12"),
+                )
+        except Exception as e:
+            st.session_state["independent_search_result"] = {
+                "ok": False,
+                "kind": "not_found",
+                "message": f"搜尋評分失敗：{e}",
+                "matches": [],
+            }
+
+search_result = st.session_state.get("independent_search_result")
+if search_result:
+    render_search_result_box(search_result)
 
 now_epoch = time.time()
 last_run = st.session_state.get("last_run_ts", 0)
