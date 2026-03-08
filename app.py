@@ -896,11 +896,14 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         proximity_52w=proximity_52w,
         status_text=status,
     )
+
     item = {
         "代號": code,
         "名稱": name,
         "市場": market,
         "現價": r["last"],
+        "漲幅%": safe_float(r.get("change_pct", 0.0), 0.0),
+        "今日最高": safe_float(r.get("high", 0.0), 0.0),
         "距離最高價%": r["dist"],
         "交易熱度": vol_ratio_live,
         "今日表現分數": signal_score,
@@ -934,6 +937,238 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有嚴格條件", "item": item}
 
 
+# ============================================================
+# 白話版續漲預測（用歷史上相似走法來估）
+# ============================================================
+def build_history_pattern_table(df):
+    if df is None or getattr(df, "empty", False):
+        return pd.DataFrame()
+    if not {"Open", "High", "Low", "Close", "Volume"}.issubset(set(df.columns)):
+        return pd.DataFrame()
+
+    x = df[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+    if len(x) < 40:
+        return pd.DataFrame()
+
+    x["prev_close"] = x["Close"].shift(1)
+    x["vol_ma20"] = x["Volume"].rolling(20).mean()
+    x["chg_pct"] = (x["Close"] / x["prev_close"] - 1.0) * 100.0
+    x["range"] = (x["High"] - x["Low"]).clip(lower=1e-9)
+    x["close_pos"] = (x["Close"] - x["Low"]) / x["range"]
+    x["vol_ratio"] = x["Volume"] / x["vol_ma20"].replace(0, pd.NA)
+    x["high_52w"] = x["High"].rolling(252, min_periods=60).max()
+    x["proximity_52w"] = (x["Close"] / x["high_52w"].replace(0, pd.NA)) * 100.0
+
+    dist_list = []
+    board_list = [0] * len(x)
+    vals = x.reset_index(drop=False)
+
+    for i in range(len(vals)):
+        prev_close = safe_float(vals.loc[i, "prev_close"], 0.0)
+        close_now = safe_float(vals.loc[i, "Close"], 0.0)
+
+        if prev_close > 0 and close_now > 0:
+            upper = calc_limit_up(prev_close)
+            dist_pct = max(0.0, (upper - close_now) / max(upper, 1e-9) * 100.0)
+        else:
+            dist_pct = None
+        dist_list.append(dist_pct)
+
+        if i >= 1:
+            streak = 0
+            j = i
+            while j >= 1:
+                cp = safe_float(vals.loc[j, "Close"], 0.0)
+                pp = safe_float(vals.loc[j - 1, "Close"], 0.0)
+                if cp > 0 and pp > 0:
+                    lim = calc_limit_up(pp)
+                    if cp >= lim - tw_tick(lim):
+                        streak += 1
+                        j -= 1
+                        continue
+                break
+            board_list[i] = streak
+
+    x["dist_pct"] = dist_list
+    x["board_streak"] = board_list
+    x = x.dropna(subset=["prev_close", "vol_ratio", "close_pos", "proximity_52w", "dist_pct"]).copy()
+
+    if x.empty:
+        return pd.DataFrame()
+
+    return x.sort_index()
+
+
+def estimate_continuation_from_history(hist_df, item, lookahead_days=5):
+    empty_result = {
+        "預測主句": "白話預測：歷史樣本太少，這張先不硬猜",
+        "預測副句": "先以原本的分數、熱度和位置為主",
+        "預估續強天數": None,
+        "再衝高機率": None,
+        "預測樣本數": 0,
+        "預測信心": "不足",
+    }
+
+    table = build_history_pattern_table(hist_df)
+    if table.empty or len(table) < 50:
+        return empty_result
+
+    if len(table) <= lookahead_days + 8:
+        return empty_result
+
+    usable = table.iloc[:-lookahead_days].copy()
+    if usable.empty:
+        return empty_result
+
+    target_change = safe_float(item.get("漲幅%", 6.0), 6.0)
+    target_vol = safe_float(item.get("交易熱度", 1.5), 1.5)
+    target_close_pos = safe_float(item.get("close_pos", 0.85), 0.85)
+    target_board = safe_int(item.get("board_val", 0), 0)
+    target_prox = safe_float(item.get("接近一年最高價%", 85.0), 85.0)
+    target_dist = safe_float(item.get("距離最高價%", 2.0), 2.0)
+
+    def pick_matches(level="tight"):
+        if level == "tight":
+            chg_min = max(5.0, min(target_change - 2.0, 9.0))
+            vol_min = max(1.3, min(target_vol * 0.70, 3.0))
+            close_pos_min = max(0.78, target_close_pos - 0.08)
+            prox_min = max(82.0, target_prox - 6.0)
+            dist_max = max(2.5, target_dist + 0.8)
+            board_min = target_board
+        elif level == "mid":
+            chg_min = max(4.0, min(target_change - 3.0, 8.0))
+            vol_min = max(1.1, min(target_vol * 0.55, 2.5))
+            close_pos_min = max(0.72, target_close_pos - 0.12)
+            prox_min = max(78.0, target_prox - 10.0)
+            dist_max = max(3.2, target_dist + 1.4)
+            board_min = max(0, target_board - 1)
+        else:
+            chg_min = max(3.0, min(target_change - 4.0, 7.0))
+            vol_min = max(1.0, min(target_vol * 0.45, 2.0))
+            close_pos_min = 0.68
+            prox_min = max(75.0, target_prox - 14.0)
+            dist_max = max(4.0, target_dist + 2.0)
+            board_min = 1 if target_board >= 2 else 0
+
+        mask = (
+            (usable["chg_pct"] >= chg_min)
+            & (usable["vol_ratio"] >= vol_min)
+            & (usable["close_pos"] >= close_pos_min)
+            & (usable["proximity_52w"] >= prox_min)
+            & (usable["dist_pct"] <= dist_max)
+        )
+
+        if board_min > 0:
+            mask &= usable["board_streak"] >= board_min
+
+        return usable[mask].copy()
+
+    matched = pd.DataFrame()
+    for level in ["tight", "mid", "loose"]:
+        matched = pick_matches(level)
+        if len(matched) >= 8:
+            break
+
+    if len(matched) < 6:
+        return empty_result
+
+    records = []
+    for idx, row in matched.iterrows():
+        pos = table.index.get_loc(idx)
+        future = table.iloc[pos + 1 : pos + 1 + lookahead_days].copy()
+        if len(future) < lookahead_days:
+            continue
+
+        signal_high = safe_float(row["High"], 0.0)
+        signal_close = safe_float(row["Close"], 0.0)
+        barrier = signal_high + tw_tick(signal_high) * 0.5
+
+        last_strong_day = 0
+        for offset, (_, frow) in enumerate(future.iterrows(), start=1):
+            if safe_float(frow["High"], 0.0) > barrier:
+                last_strong_day = offset
+
+        keep_days = 0
+        for offset, (_, frow) in enumerate(future.iterrows(), start=1):
+            if safe_float(frow["Close"], 0.0) >= signal_close:
+                keep_days = offset
+            else:
+                break
+
+        hit3 = 1 if safe_float(future.head(3)["High"].max(), 0.0) > barrier else 0
+
+        records.append(
+            {
+                "續強天數": last_strong_day,
+                "守住天數": keep_days,
+                "三天內再衝高": hit3,
+            }
+        )
+
+    if len(records) < 6:
+        return empty_result
+
+    stat_df = pd.DataFrame(records)
+    sample_n = len(stat_df)
+
+    est_days = int(round(max(
+        safe_float(stat_df["續強天數"].median(), 0.0),
+        safe_float(stat_df["守住天數"].median(), 0.0),
+    )))
+    est_days = max(1, min(lookahead_days, est_days))
+
+    prob3 = int(round(stat_df["三天內再衝高"].mean() * 100.0))
+
+    if prob3 < 40 and est_days > 2:
+        est_days = 2
+    if prob3 >= 75 and est_days < 2:
+        est_days = 2
+
+    if sample_n >= 24:
+        confidence = "高"
+    elif sample_n >= 12:
+        confidence = "中"
+    else:
+        confidence = "低"
+
+    sub_tail = ""
+    if confidence == "低":
+        sub_tail = "（樣本偏少，先參考就好）"
+
+    return {
+        "預測主句": f"白話預測：大概還有 {est_days} 天續強空間",
+        "預測副句": f"歷史上像今天這種走法，3 天內再衝高的機率約 {prob3}%｜樣本 {sample_n} 次｜信心：{confidence}{sub_tail}",
+        "預估續強天數": est_days,
+        "再衝高機率": prob3,
+        "預測樣本數": sample_n,
+        "預測信心": confidence,
+    }
+
+
+def attach_continuation_prediction(res_df, raw_daily, meta_dict):
+    if res_df is None or res_df.empty:
+        return res_df
+
+    out_rows = []
+    for _, row in res_df.iterrows():
+        item = row.to_dict()
+        code = str(item.get("代號", "")).strip()
+
+        hist_df = pd.DataFrame()
+        try:
+            if code in meta_dict:
+                sym = symbol_of(code, meta_dict)
+                hist_df = _extract_symbol_frame(raw_daily, sym)
+        except Exception:
+            hist_df = pd.DataFrame()
+
+        pred = estimate_continuation_from_history(hist_df, item)
+        item.update(pred)
+        out_rows.append(item)
+
+    return pd.DataFrame(out_rows)
+
+
 def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_bloodline, min_board, vault=None):
     code, matches = resolve_stock_query(query, meta_dict)
     if not code:
@@ -948,7 +1183,9 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
 
     row = None
     feat = None
+    hist_df = pd.DataFrame()
     source = []
+
     if vault:
         cdf = vault.get("candidate_df")
         if cdf is not None and not getattr(cdf, "empty", False):
@@ -956,19 +1193,29 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
             if not hit.empty:
                 row = hit.iloc[0].to_dict()
                 source.append("已下載好的資料庫")
+
         feat = (vault.get("feature_cache") or {}).get(code)
         if feat:
             source.append("已計算過的過去表現")
+
+        try:
+            raw_daily_vault = vault.get("raw_daily")
+            if raw_daily_vault is not None and code in meta_dict:
+                sym = symbol_of(code, meta_dict)
+                hist_df = _extract_symbol_frame(raw_daily_vault, sym)
+        except Exception:
+            hist_df = pd.DataFrame()
 
     if row is None:
         session = make_retry_session()
         row = fetch_single_quote_row(session, api_key, code, meta_dict)
         source.append("即時查詢最新報價")
 
-    if feat is None:
+    if feat is None or hist_df.empty:
         sym = symbol_of(code, meta_dict)
         raw_daily = yf_download_daily([sym], period=f"{RAW_HISTORY_DAYS}d")
         df = _extract_symbol_frame(raw_daily, sym)
+        hist_df = df.copy()
         feat = compute_feature_from_history(df, now_ts.date())
         source.append("剛下載好的歷史資料")
 
@@ -981,6 +1228,11 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
         only_tse=False,
         min_board=min_board,
     )
+
+    if assessment.get("item"):
+        pred = estimate_continuation_from_history(hist_df, assessment["item"])
+        assessment["item"].update(pred)
+
     return {
         "ok": True,
         "kind": "result",
@@ -1124,7 +1376,7 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
                     "entry_date": str(pd.Timestamp(entry_idx).date()),
                     "exit_date": str(pd.Timestamp(exit_idx).date()),
                     "entry": round(entry, 2),
-                    "exit": round(exit_),
+                    "exit": round(exit_, 2),
                     "return_pct": round(ret, 2),
                     "board_streak": int(df.loc[idx, "board_streak"]),
                     "vol_ratio": round(safe_float(df.loc[idx, "vol_ratio"], 0.0), 2),
@@ -1287,6 +1539,7 @@ def render_search_result_box(search_result):
     passed = assess.get("passed", False)
     badge_cls = "search-good" if passed else "search-warn"
     badge_text = "順利通過當前條件" if passed else f"沒有通過｜{assess.get('reason_text', '表現未達標準')}"
+
     html_block = f"""
     <div class='search-panel'>
       <div class='search-head-row'>
@@ -1302,6 +1555,10 @@ def render_search_result_box(search_result):
         <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))}</div>
         <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
         <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
+
+        <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
+        <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
+
         <div class='card-stars-wrap'>
           <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
           <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
@@ -1328,7 +1585,6 @@ st.set_page_config(page_title=APP_TITLE, page_icon="⚡", layout="wide", initial
 st.markdown(
     """
 <style>
-/* CSS保持不變，維持你的版面設計 */
 :root {
     --bg0: #040506;
     --bg1: #0a0d11;
@@ -1452,6 +1708,25 @@ st.markdown(
 }
 .stat-k {font-size: 11px; color: #8ba2b8; font-weight: 700; letter-spacing: .8px;}
 .stat-v {font-size: 15px; color: #f8fafc; font-weight: 900; margin-top: 2px;}
+
+.card-predict {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(56, 189, 248, 0.14);
+    color: #d9f2ff;
+    font-size: 13px;
+    font-weight: 800;
+    line-height: 1.5;
+}
+.card-predict-note {
+    margin-top: 8px;
+    color: #8fb1c9;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
 .fail-bag {margin: 6px 0 4px 0;}
 .fail-tag {
     display: inline-block;
@@ -1749,6 +2024,7 @@ if launch:
                 (pre_res["代號"].head(FINAL_ENRICH_LIMIT).tolist() if not pre_res.empty else [])
                 + candidate_df.sort_values(["dist", "vol_sh"], ascending=[True, False])["code"].head(FINAL_ENRICH_LIMIT).tolist()
             )[:FINAL_ENRICH_LIMIT]
+
             if enrich_codes:
                 status.update(label="🧠 補強重點候選名單的買賣排隊狀況...", state="running")
                 t_enrich = time.perf_counter()
@@ -1788,6 +2064,14 @@ if "raw_data_vault_v12" in st.session_state:
         min_board=min_board,
         base_diag=vault["base_diag"],
     )
+
+    if not res.empty:
+        res = attach_continuation_prediction(
+            res_df=res,
+            raw_daily=vault["raw_daily"],
+            meta_dict=vault["meta"],
+        )
+
     final_diag["t_filter"] = time.perf_counter() - t_filter
 
     bt_t0 = time.perf_counter()
@@ -1852,6 +2136,10 @@ if "raw_data_vault_v12" in st.session_state:
   <div class="card-name">{row['名稱']} ｜ {row['市場']}</div>
   <div class="card-price">{row['現價']:.2f}</div>
   <div class="card-status">{row['狀態']}</div>
+
+  <div class="card-predict">{html.escape(str(row.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
+  <div class="card-predict-note">{html.escape(str(row.get('預測副句', '先以原本分數與熱度為主')))}</div>
+
   <div class="card-stars-wrap">
     <div class="card-stars">{row['推薦指數']}</div>
     <div class="card-stars-badge">推薦 {int(row['推薦星等'])}/5</div>
