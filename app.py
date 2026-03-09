@@ -22,18 +22,18 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 基本設定
 # ============================================================
 APP_TITLE = "起漲戰情室 OMEGA"
-APP_SUBTITLE = "v12.1 平衡修正版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
+APP_SUBTITLE = "v12.2 排序分級版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
 RAW_HISTORY_DAYS = 420
 DEFAULT_COOLDOWN_SECONDS = 45
-DEFAULT_TOP_VOLUME = 100
-DEFAULT_TOP_MOVERS = 50
+DEFAULT_TOP_VOLUME = 160
+DEFAULT_TOP_MOVERS = 100
 DEFAULT_MIN_BOARD = 1
 DEFAULT_HOLD_DAYS = 5
-MAX_CANDIDATES = 140
-FINAL_ENRICH_LIMIT = 18
+MAX_CANDIDATES = 240
+FINAL_ENRICH_LIMIT = 24
 YF_DOWNLOAD_CHUNK = 45
 
 # ============================================================
@@ -685,38 +685,40 @@ def get_thresholds(now_ts, is_test=False):
 
     if is_test:
         if m <= 60:
-            pullback_lim = 0.032
-            dist_limit = 6.5
+            pullback_lim = 0.040
+            dist_limit = 7.2
         elif m <= 180:
-            pullback_lim = 0.024
-            dist_limit = 5.3
+            pullback_lim = 0.032
+            dist_limit = 6.0
         else:
-            pullback_lim = 0.018
-            dist_limit = 4.2
+            pullback_lim = 0.025
+            dist_limit = 4.8
         return {
             "dist_limit": dist_limit,
-            "vol_limit": 120_000,
+            "vol_limit": 80_000,
             "pullback_lim": pullback_lim,
-            "close_pos_min": 0.52,
-            "vol_ratio_min": 0.72,
+            "close_pos_min": 0.48,
+            "vol_ratio_min": 0.62,
+            "score_pass": 3.6,
         }
 
     if m <= 60:
-        dist_limit = 4.8
-        pullback_lim = 0.022
+        dist_limit = 5.8
+        pullback_lim = 0.030
     elif m <= 180:
-        dist_limit = 3.8
-        pullback_lim = 0.015
+        dist_limit = 4.6
+        pullback_lim = 0.022
     else:
-        dist_limit = 2.8
-        pullback_lim = 0.010
+        dist_limit = 3.5
+        pullback_lim = 0.015
 
     return {
         "dist_limit": dist_limit,
-        "vol_limit": 350_000,
+        "vol_limit": 180_000,
         "pullback_lim": pullback_lim,
-        "close_pos_min": 0.68,
-        "vol_ratio_min": 0.98,
+        "close_pos_min": 0.60,
+        "vol_ratio_min": 0.82,
+        "score_pass": 4.8,
     }
 
 
@@ -898,46 +900,51 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
 
     score = 0.0
-    score += min(3.0, max(0.0, 3.2 - r["dist"] * 0.95))
-    score += min(3.0, max(0.0, vol_ratio_live - 0.85))
-    score += 1.0 if close_pos >= 0.90 else 0.6 if close_pos >= 0.78 else 0.2 if close_pos >= 0.62 else 0.0
-    score += min(1.4, board_streak * 0.7)
-    score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
-    score += 0.4 if ret5 > 0 else 0.0
-    score += 0.4 if ret20 > 0 else 0.0
+    score += min(3.2, max(0.0, 3.4 - r["dist"] * 0.72))
+    score += min(2.8, max(0.0, vol_ratio_live - 0.55))
+    score += 1.1 if close_pos >= 0.90 else 0.8 if close_pos >= 0.78 else 0.45 if close_pos >= 0.62 else 0.15 if close_pos >= 0.48 else 0.0
+    score += min(1.1, board_streak * 0.55)
+    score += 0.85 if proximity_52w >= 92 else 0.45 if proximity_52w >= 85 else 0.15 if proximity_52w >= 76 else 0.0
+    score += 0.45 if ret5 > 0 else -0.10
+    score += 0.35 if ret20 > 0 else -0.05
 
     bloodline_note = ""
     if use_bloodline:
         if board_streak >= max(2, min_board + 1):
-            score += 0.7
+            score += 0.55
             bloodline_note = "｜血統強"
         elif board_streak >= min_board:
-            score += 0.35
+            score += 0.25
             bloodline_note = "｜血統穩"
         else:
-            score -= 0.25 if not is_test else 0.08
             bloodline_note = "｜新起漲"
 
     weak_reason = None
     soft_penalty = 0.0
-    relaxed_vol_ratio_floor = max(0.60, th["vol_ratio_min"] * 0.72)
-    hard_pullback_lim = th["pullback_lim"] * 1.8
-    hard_close_pos_floor = max(0.38, th["close_pos_min"] - 0.22)
+    relaxed_vol_ratio_floor = max(0.48, th["vol_ratio_min"] * 0.58)
+    hard_pullback_lim = th["pullback_lim"] * 2.4
+    hard_close_pos_floor = max(0.28, th["close_pos_min"] - 0.30)
 
     if vol_ratio_live < relaxed_vol_ratio_floor:
         weak_reason = ("買賣不夠熱絡", "即時的交易熱度真的偏弱")
     elif vol_ratio_live < th["vol_ratio_min"]:
-        soft_penalty += 0.55
+        soft_penalty += 0.40
 
     if pullback > hard_pullback_lim:
         weak_reason = ("從高點掉下來太多", "目前價格已經從今天最高點掉落太多")
     elif pullback > th["pullback_lim"]:
-        soft_penalty += min(0.9, (pullback - th["pullback_lim"]) * 35.0)
+        soft_penalty += min(0.75, (pullback - th["pullback_lim"]) * 22.0)
 
     if close_pos < hard_close_pos_floor and rng > max(0.1, r["last"] * 0.002):
         weak_reason = ("目前價格相對弱勢", "今天價格位置看起來真的偏弱")
     elif close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
-        soft_penalty += 0.45
+        soft_penalty += 0.30
+
+    if r["dist"] > th["dist_limit"]:
+        soft_penalty += min(1.25, (r["dist"] - th["dist_limit"]) * 0.42)
+
+    if r["vol_sh"] < th["vol_limit"]:
+        soft_penalty += min(1.00, (th["vol_limit"] - r["vol_sh"]) / max(th["vol_limit"], 1.0) * 1.2)
 
     score -= soft_penalty
     signal_score = max(0.0, min(10.0, round(score, 2)))
@@ -954,6 +961,8 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         status_text=status,
     )
 
+    watch_grade = "A級焦點" if signal_score >= 7.2 else "B級觀察" if signal_score >= 5.6 else "C級候補" if signal_score >= th["score_pass"] else "待觀察"
+
     item = {
         "代號": code,
         "名稱": name,
@@ -968,6 +977,7 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "推薦指數": render_star_bar(star_count),
         "狀態": status,
         "階段": f"過去連續大漲 {board_streak} 天",
+        "觀察分級": watch_grade,
         "board_val": board_streak,
         "close_pos": close_pos,
         "pullback": pullback,
@@ -981,11 +991,11 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "成交量": safe_int(r.get("vol_sh", 0), 0),
     }
 
-    if r["dist"] > th["dist_limit"] or r["vol_sh"] < th["vol_limit"]:
-        return {"passed": False, "reason_key": "未達基本熱門門檻", "reason_text": "未達到基本篩選條件", "item": item}
     if weak_reason:
         return {"passed": False, "reason_key": weak_reason[0], "reason_text": weak_reason[1], "item": item}
-    return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有條件", "item": item}
+    if signal_score < th["score_pass"]:
+        return {"passed": False, "reason_key": "未達基本熱門門檻", "reason_text": "整體分數還不夠強", "item": item}
+    return {"passed": True, "reason_key": "通過", "reason_text": "已納入排序名單", "item": item}
 
 
 # ============================================================
@@ -1306,7 +1316,8 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
     if only_tse:
         work = work[work["market"] == "上市"].copy()
 
-    work = work[(work["dist"] <= th["dist_limit"]) & (work["vol_sh"] >= th["vol_limit"])].copy()
+    base_floor = max(60_000, int(th["vol_limit"] * 0.45))
+    work = work[work["vol_sh"] >= base_floor].copy()
     stats["候選總數"] = len(work)
     if work.empty:
         diag["final_count"] = 0
@@ -1335,7 +1346,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     res = pd.DataFrame(out)
     if not res.empty:
-        res = res.sort_values(["推薦星等", "今日表現分數", "board_val", "交易熱度", "距離最高價%"], ascending=[False, False, False, False, True]).reset_index(drop=True)
+        res = res.sort_values(["今日表現分數", "推薦星等", "交易熱度", "距離最高價%", "board_val"], ascending=[False, False, False, True, False]).reset_index(drop=True)
     diag["final_count"] = len(res)
     return res, stats, diag
 
