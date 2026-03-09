@@ -1543,7 +1543,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
             if s >= a_score and rsk <= a_risk and chg >= 4.0 and heat >= 1.15 and cp >= 0.78:
                 return "A級焦點"
-            if radar_s >= 3.4 and s >= max(4.8, b_score - 0.4) and rsk <= b_risk and dist <= 4.8 and chg >= 1.5 and cp >= 0.68:
+            if radar_s >= 3.7 and s >= max(4.9, b_score - 0.35) and rsk <= min(b_risk, 4) and dist <= 4.4 and 0.8 <= chg <= 8.8 and cp >= 0.72:
                 return "B級觀察"
 
             # C 級要像真正候補，不要太像小 B 級；放寬模式下再稍微鬆一點
@@ -1573,7 +1573,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 1:
             reserve_idx = (
                 res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]
-                .sort_values(["起漲雷達分數", "今日表現分數", "交易熱度"], ascending=[False, False, False])
+                .sort_values(["突破區間分數", "起漲雷達分數", "量能抬升比", "今日表現分數"], ascending=[False, False, False, False])
                 .head(1)
                 .index
             )
@@ -1862,25 +1862,36 @@ def render_backtest_table(display_df: pd.DataFrame):
 
 def build_reason_tags(row):
     tags = []
-    if safe_float(row.get("突破區間分數", 0.0), 0.0) >= 1.2:
-        tags.append("突破整理上緣")
-    elif safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 4.0:
-        tags.append("整理後突破")
-    elif safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 3.0:
-        tags.append("準突破")
+    breakout = safe_float(row.get("突破區間分數", 0.0), 0.0)
+    radar = safe_float(row.get("起漲雷達分數", 0.0), 0.0)
+    vol_lift = safe_float(row.get("量能抬升比", 1.0), 1.0)
+    cp = safe_float(row.get("close_pos", 0.0), 0.0)
+    ret5 = safe_float(row.get("近5天表現%", 0.0), 0.0)
+    ret20 = safe_float(row.get("近20天表現%", 0.0), 0.0)
+    rising = safe_int(row.get("同族群跟漲數", 0), 0)
 
-    if safe_float(row.get("量能抬升比", 1.0), 1.0) >= 1.25:
-        tags.append("量能抬升")
-    if safe_float(row.get("close_pos", 0.0), 0.0) >= 0.82:
+    if breakout >= 1.2:
+        tags.append("突破整理上緣")
+    elif radar >= 4.2:
+        tags.append("整理後突破")
+    elif radar >= 3.4:
+        tags.append("準發動")
+
+    if vol_lift >= 1.28:
+        tags.append("量能明顯抬升")
+    elif vol_lift >= 1.12:
+        tags.append("量能轉強")
+
+    if cp >= 0.84:
         tags.append("收在高檔")
-    if safe_float(row.get("近20天表現%", 0.0), 0.0) > 0 and safe_float(row.get("近5天表現%", 0.0), 0.0) > 0:
+
+    if ret20 > 0 and ret5 > 0:
         tags.append("趨勢翻正")
 
-    rising = safe_int(row.get("同族群跟漲數", 0), 0)
     if rising >= 3:
-        tags.append("族群共振")
+        tags.append(f"同族群跟漲{rising}檔")
     elif rising >= 1:
-        tags.append("族群跟漲")
+        tags.append(f"族群跟漲{rising}檔")
     else:
         tags.append("單兵觀察")
 
@@ -1922,47 +1933,43 @@ def render_search_result_box(search_result):
     badge_cls = "search-good" if passed else "search-warn"
     badge_text = "順利通過當前條件" if passed else f"沒有通過｜{assess.get('reason_text', '表現未達標準')}"
 
-    html_block = textwrap.dedent(f"""
-<div class='search-panel'>
-  <div class='search-head-row'>
-    <div>
-      <div class='search-head'>獨立搜尋與評分</div>
-      <div class='search-source'>資料來源：{html.escape(search_result.get('source', ''))}</div>
-    </div>
-    <div class='{badge_cls}'>{html.escape(badge_text)}</div>
-  </div>
-  <div class='card search-card'>
-    <div class='card-stage'>{html.escape(item.get('階段', ''))}</div>
-    <div class='card-code'>{html.escape(str(item.get('代號', '')))}</div>
-    <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))} ｜ {html.escape(str(item.get('產業', '其他')))}</div>
-    <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
-    <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
-
-    <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
-    <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
-    <div class='soft-note'>入選理由：{html.escape(str(item.get('入選理由', '先看分數與位置')))}</div>
-
-    <div class='card-stars-wrap'>
-      <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
-      <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
-    </div>
-    <div class='card-grid'>
-      <div class='stat-pill'><div class='stat-k'>今日分數</div><div class='stat-v'>{safe_float(item.get('今日表現分數', 0.0), 0.0):.2f}</div></div>
-      <div class='stat-pill'><div class='stat-k'>交易熱度</div><div class='stat-v'>{safe_float(item.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
-      <div class='stat-pill'><div class='stat-k'>距最高價</div><div class='stat-v'>{safe_float(item.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
-      <div class='stat-pill'><div class='stat-k'>接近最高點</div><div class='stat-v'>{safe_float(item.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
-      <div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>
-      <div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>
-      <div class='stat-pill'><div class='stat-k'>族群共振分數</div><div class='stat-v'>{safe_float(item.get('族群共振分數', 0.0), 0.0):.2f}</div></div>
-      <div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>
-      <div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>
-    </div>
-  </div>
-</div>
-""")
-    st.markdown(html_block, unsafe_allow_html=True)
-
-
+    parts = [
+        "<div class='search-panel'>",
+        "<div class='search-head-row'>",
+        "<div>",
+        "<div class='search-head'>獨立搜尋與評分</div>",
+        f"<div class='search-source'>資料來源：{html.escape(search_result.get('source', ''))}</div>",
+        "</div>",
+        f"<div class='{badge_cls}'>{html.escape(badge_text)}</div>",
+        "</div>",
+        "<div class='card search-card'>",
+        f"<div class='card-stage'>{html.escape(str(item.get('階段', '')))}</div>",
+        f"<div class='card-code'>{html.escape(str(item.get('代號', '')))}</div>",
+        f"<div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))} ｜ {html.escape(str(item.get('產業', '其他')))}</div>",
+        f"<div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>",
+        f"<div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>",
+        f"<div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>",
+        f"<div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>",
+        f"<div class='soft-note'>入選理由：{html.escape(str(item.get('入選理由', '先看分數與位置')))}</div>",
+        "<div class='card-stars-wrap'>",
+        f"<div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>",
+        f"<div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>",
+        "</div>",
+        "<div class='card-grid'>",
+        f"<div class='stat-pill'><div class='stat-k'>今日分數</div><div class='stat-v'>{safe_float(item.get('今日表現分數', 0.0), 0.0):.2f}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>交易熱度</div><div class='stat-v'>{safe_float(item.get('交易熱度', 0.0), 0.0):.2f}x</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>距最高價</div><div class='stat-v'>{safe_float(item.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>接近最高點</div><div class='stat-v'>{safe_float(item.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>族群共振分數</div><div class='stat-v'>{safe_float(item.get('族群共振分數', 0.0), 0.0):.2f}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>",
+        "</div>",
+        "</div>",
+        "</div>",
+    ]
+    st.markdown(''.join(parts), unsafe_allow_html=True)
 
 def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
     if section_df is None or section_df.empty:
@@ -2567,10 +2574,16 @@ if "raw_data_vault_v12" in st.session_state:
         if not base_df.empty and "industry" in base_df.columns:
             base_df["_industry"] = base_df["industry"].fillna("其他").replace("", "其他")
             # 同族群一起漲：不是只算同產業有幾檔，而是有幾檔同產業也同步轉強
+            high_s = base_df.get("high", pd.Series([0] * len(base_df))).astype(float)
+            low_s = base_df.get("low", pd.Series([0] * len(base_df))).astype(float)
+            last_s = base_df.get("last", pd.Series([0] * len(base_df))).astype(float)
+            rng_s = (high_s - low_s).clip(lower=1e-9)
+            close_pos_s = ((last_s - low_s) / rng_s).clip(lower=0.0, upper=1.0)
             rising_mask = (
-                (base_df.get("change_pct", 0).astype(float) >= (0.8 if not is_test else 0.3)) &
-                (base_df.get("dist", 99).astype(float) <= (6.0 if not is_test else 7.0)) &
-                (base_df.get("vol_sh", 0).astype(float) >= (300000 if not is_test else 150000))
+                (base_df.get("change_pct", 0).astype(float) >= (1.2 if not is_test else 0.6)) &
+                (base_df.get("dist", 99).astype(float) <= (5.2 if not is_test else 6.2)) &
+                (base_df.get("vol_sh", 0).astype(float) >= (350000 if not is_test else 180000)) &
+                (close_pos_s >= (0.70 if not is_test else 0.64))
             )
             industry_rising = base_df.loc[rising_mask, "_industry"].value_counts()
         else:
@@ -2586,7 +2599,18 @@ if "raw_data_vault_v12" in st.session_state:
                 return f"同族群 {total_n} 檔｜未同步"
             return "一支獨秀"
         res["族群狀態"] = res.apply(_cluster_status, axis=1)
-        res["族群共振分數"] = res["同族群跟漲數"].apply(lambda n: round(min(3.0, max(0, int(n)) * 0.85), 2))
+        def _cluster_score(n):
+            n = int(n)
+            if n >= 4:
+                return 3.0
+            if n == 3:
+                return 2.4
+            if n == 2:
+                return 1.6
+            if n == 1:
+                return 0.8
+            return 0.0
+        res["族群共振分數"] = res["同族群跟漲數"].apply(_cluster_score)
         res["入選理由"] = res.apply(build_reason_tags, axis=1)
 
     a_df = res[res["模式分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
