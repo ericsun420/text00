@@ -4,6 +4,7 @@ import math
 import os
 import re
 import time
+import textwrap
 from copy import deepcopy
 from datetime import datetime, timedelta, time as dtime, timezone
 from collections import deque
@@ -1921,44 +1922,44 @@ def render_search_result_box(search_result):
     badge_cls = "search-good" if passed else "search-warn"
     badge_text = "順利通過當前條件" if passed else f"沒有通過｜{assess.get('reason_text', '表現未達標準')}"
 
-    html_block = f"""
-    <div class='search-panel'>
-      <div class='search-head-row'>
-        <div>
-          <div class='search-head'>獨立搜尋與評分</div>
-          <div class='search-source'>資料來源：{html.escape(search_result.get('source', ''))}</div>
-        </div>
-        <div class='{badge_cls}'>{html.escape(badge_text)}</div>
-      </div>
-      <div class='card search-card'>
-        <div class='card-stage'>{html.escape(item.get('階段', ''))}</div>
-        <div class='card-code'>{html.escape(str(item.get('代號', '')))}</div>
-        <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))} ｜ {html.escape(str(item.get('產業', '其他')))}</div>
-        <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
-        <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
-
-        <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
-        <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
-        <div class='soft-note'>入選理由：{html.escape(str(item.get('入選理由', '先看分數與位置')))}</div>
-
-        <div class='card-stars-wrap'>
-          <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
-          <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
-        </div>
-        <div class='card-grid'>
-          <div class='stat-pill'><div class='stat-k'>今日分數</div><div class='stat-v'>{safe_float(item.get('今日表現分數', 0.0), 0.0):.2f}</div></div>
-          <div class='stat-pill'><div class='stat-k'>交易熱度</div><div class='stat-v'>{safe_float(item.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
-          <div class='stat-pill'><div class='stat-k'>距最高價</div><div class='stat-v'>{safe_float(item.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
-          <div class='stat-pill'><div class='stat-k'>接近最高點</div><div class='stat-v'>{safe_float(item.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
-          <div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>
-          <div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>
-          <div class='stat-pill'><div class='stat-k'>族群共振分數</div><div class='stat-v'>{safe_float(item.get('族群共振分數', 0.0), 0.0):.2f}</div></div>
-          <div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>
-          <div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>
-        </div>
-      </div>
+    html_block = textwrap.dedent(f"""
+<div class='search-panel'>
+  <div class='search-head-row'>
+    <div>
+      <div class='search-head'>獨立搜尋與評分</div>
+      <div class='search-source'>資料來源：{html.escape(search_result.get('source', ''))}</div>
     </div>
-    """
+    <div class='{badge_cls}'>{html.escape(badge_text)}</div>
+  </div>
+  <div class='card search-card'>
+    <div class='card-stage'>{html.escape(item.get('階段', ''))}</div>
+    <div class='card-code'>{html.escape(str(item.get('代號', '')))}</div>
+    <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))} ｜ {html.escape(str(item.get('產業', '其他')))}</div>
+    <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
+    <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
+
+    <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
+    <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
+    <div class='soft-note'>入選理由：{html.escape(str(item.get('入選理由', '先看分數與位置')))}</div>
+
+    <div class='card-stars-wrap'>
+      <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
+      <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
+    </div>
+    <div class='card-grid'>
+      <div class='stat-pill'><div class='stat-k'>今日分數</div><div class='stat-v'>{safe_float(item.get('今日表現分數', 0.0), 0.0):.2f}</div></div>
+      <div class='stat-pill'><div class='stat-k'>交易熱度</div><div class='stat-v'>{safe_float(item.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
+      <div class='stat-pill'><div class='stat-k'>距最高價</div><div class='stat-v'>{safe_float(item.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
+      <div class='stat-pill'><div class='stat-k'>接近最高點</div><div class='stat-v'>{safe_float(item.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
+      <div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>
+      <div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>
+      <div class='stat-pill'><div class='stat-k'>族群共振分數</div><div class='stat-v'>{safe_float(item.get('族群共振分數', 0.0), 0.0):.2f}</div></div>
+      <div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>
+      <div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>
+    </div>
+  </div>
+</div>
+""")
     st.markdown(html_block, unsafe_allow_html=True)
 
 
