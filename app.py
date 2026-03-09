@@ -984,7 +984,9 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     score += min(3.2, max(0.0, 3.2 - r["dist"] * 0.85))
     score += min(3.0, max(0.0, vol_ratio_live - 0.85))
     score += 1.1 if close_pos >= 0.92 else 0.6 if close_pos >= 0.78 else 0.2 if close_pos >= 0.62 else 0.0
-    score += min(1.2, board_streak * 0.55)
+    # 連續大漲血統不要在開關關閉時仍然偷偷大量影響主分數
+    # 基礎只保留很輕的「曾經有動能」痕跡，真正明顯的血統效果交給 use_bloodline 開關
+    score += min(0.22, board_streak * 0.10)
     score += 0.9 if proximity_52w >= 95 else 0.5 if proximity_52w >= 88 else 0.0
     score += 0.35 if ret5 > 0 else 0.0
     score += 0.35 if ret20 > 0 else 0.0
@@ -1024,22 +1026,31 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
 
     bloodline_note = ""
     if use_bloodline:
+        # 開啟時要真的有感：有血統明顯加分，沒血統也真的會被扣
         if board_streak >= max(2, min_board + 1):
-            score += 0.9
+            score += 1.35
             bloodline_note = "｜血統強"
+            risk_count = max(0, risk_count - 1)
         elif board_streak >= min_board:
-            score += 0.45
+            score += 0.70
             bloodline_note = "｜血統穩"
         else:
-            score -= 0.45 if not is_test else 0.18
+            score -= 0.80 if not is_test else 0.35
             risk_flags.append("血統偏弱")
             risk_count += 1
             bloodline_note = "｜新起漲"
+    else:
+        # 關掉血統時，對首根型稍微友善一點，避免開關切了名單還是完全一樣
+        if board_streak == 0:
+            score += 0.22
 
     if is_test:
-        score += 0.4
-        risk_count = max(0, risk_count - 1)
-        if risk_flags:
+        # 放寬模式要真的看得出差異，不只是輕微 +0.4
+        score += 0.85
+        risk_count = max(0, risk_count - 2)
+        if len(risk_flags) >= 2:
+            risk_flags = risk_flags[:-2]
+        elif risk_flags:
             risk_flags = risk_flags[:-1]
 
     signal_score = max(0.0, min(10.0, round(score, 2)))
@@ -1085,10 +1096,19 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     elif vol_ma20 > 0 and vol_ma5 / max(vol_ma20, 1e-9) >= 1.10:
         breakout_score += 0.30
 
-    if board_streak == 0:
-        breakout_score += 0.35
-    elif board_streak >= 2:
-        breakout_score -= 0.15
+    if use_bloodline:
+        if board_streak >= max(2, min_board + 1):
+            breakout_score += 0.55
+        elif board_streak >= min_board:
+            breakout_score += 0.25
+        else:
+            breakout_score -= 0.30 if not is_test else 0.12
+    else:
+        # 關掉血統時，稍微偏愛首根型
+        if board_streak == 0:
+            breakout_score += 0.45
+        elif board_streak >= 2:
+            breakout_score -= 0.12
 
     if hist_missing:
         breakout_score -= 0.25
@@ -1511,25 +1531,45 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     res = pd.DataFrame(out)
     if not res.empty:
-        res = res.sort_values(
-            ["今日表現分數", "推薦星等", "交易熱度", "board_val", "距離最高價%"],
-            ascending=[False, False, False, False, True],
-        ).reset_index(drop=True)
-
+        # 模式排序分：讓兩個開關真的會改變排序與入選名單，而不只是顯示文案不同
         if "風險數" not in res.columns:
             res["風險數"] = 0
+        if "起漲雷達分數" not in res.columns:
+            res["起漲雷達分數"] = 0.0
+
+        res["模式排序分"] = (
+            res["今日表現分數"].astype(float)
+            + res["起漲雷達分數"].astype(float) * 0.68
+            - res["風險數"].astype(float) * 0.38
+        )
+
+        if use_bloodline:
+            res["模式排序分"] += res["board_val"].astype(float).clip(upper=3) * 0.55
+            res.loc[res["board_val"].astype(int) == 0, "模式排序分"] -= 0.55
+        else:
+            res.loc[res["board_val"].astype(int) == 0, "模式排序分"] += 0.25
+
+        if is_test:
+            res["模式排序分"] += 0.55
+            res.loc[res["交易熱度"].astype(float) >= 0.80, "模式排序分"] += 0.18
+            res.loc[res["距離最高價%"].astype(float) <= 6.8, "模式排序分"] += 0.18
+            res.loc[res["風險數"].astype(int) <= 3, "模式排序分"] += 0.12
+
+        res = res.sort_values(
+            ["模式排序分", "今日表現分數", "推薦星等", "交易熱度", "board_val", "距離最高價%"],
+            ascending=[False, False, False, False, False, True],
+        ).reset_index(drop=True)
+
         score = res["今日表現分數"].astype(float)
         risk = res["風險數"].astype(int)
 
         if is_test:
-            a_score, a_risk = 6.2, 3
-            b_score, b_risk = 4.8, 5
+            a_score, a_risk = 5.9, 3
+            b_score, b_risk = 4.6, 5
         else:
             a_score, a_risk = 6.8, 2
             b_score, b_risk = 5.4, 4
 
-        if "起漲雷達分數" not in res.columns:
-            res["起漲雷達分數"] = 0.0
         radar = res["起漲雷達分數"].astype(float)
 
         def _tier(row):
@@ -1540,15 +1580,20 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             dist = float(row.get("距離最高價%", 99.0))
             heat = float(row.get("交易熱度", 0.0))
             cp = float(row.get("close_pos", 0.0))
+            board = int(row.get("board_val", 0))
 
-            if s >= a_score and rsk <= a_risk and chg >= 4.0 and heat >= 1.15 and cp >= 0.78:
+            blood_a_ok = (board >= 1) or (not use_bloodline)
+            blood_b_ok = (board >= 1) or (not use_bloodline) or (radar_s >= 4.4 and s >= b_score + 0.45)
+
+            if s >= a_score and rsk <= a_risk and chg >= (3.6 if is_test else 4.0) and heat >= (0.95 if is_test else 1.15) and cp >= (0.74 if is_test else 0.78) and blood_a_ok:
                 return "A級焦點"
-            if radar_s >= 3.7 and s >= max(4.9, b_score - 0.35) and rsk <= min(b_risk, 4) and dist <= 4.4 and 0.8 <= chg <= 8.8 and cp >= 0.72:
+
+            if radar_s >= (3.3 if is_test else 3.7) and s >= max(4.6 if is_test else 4.9, b_score - 0.35) and rsk <= min(b_risk, 4 if not is_test else 5) and dist <= (5.2 if is_test else 4.4) and 0.4 <= chg <= 9.5 and cp >= (0.66 if is_test else 0.72) and blood_b_ok:
                 return "B級觀察"
 
             # C 級要像真正候補，不要太像小 B 級；放寬模式下再稍微鬆一點
             if is_test:
-                c_radar_min, c_heat_min, c_dist_max, c_chg_min = 2.1, 0.80, 6.8, 0.3
+                c_radar_min, c_heat_min, c_dist_max, c_chg_min = 1.8, 0.72, 7.4, 0.1
             else:
                 c_radar_min, c_heat_min, c_dist_max, c_chg_min = 2.0, 0.78, 6.8, 0.2
 
