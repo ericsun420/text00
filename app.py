@@ -1760,6 +1760,24 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
     else:
         res = pd.DataFrame(columns=["分級", "模式分級"])
 
+    # 最終同步：避免同一檔同時出現在「未達門檻/風險統計」與 A/B/C 推薦區
+    if not res.empty and "模式分級" in res.columns:
+        final_df = res[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"])].copy()
+        final_codes = set(final_df["代號"].astype(str)) if (not final_df.empty and "代號" in final_df.columns) else set()
+        for k, v in list(stats.items()):
+            if isinstance(v, list):
+                cleaned = []
+                seen = set()
+                for item in v:
+                    item_s = str(item)
+                    code = item_s.split()[0] if item_s else ""
+                    if code in final_codes:
+                        continue
+                    if item_s not in seen:
+                        seen.add(item_s)
+                        cleaned.append(item_s)
+                stats[k] = cleaned
+
     diag["final_count"] = len(res)
     return res, stats, diag
 
