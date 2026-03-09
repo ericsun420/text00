@@ -1464,6 +1464,35 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
     if assessment.get("item"):
         pred = estimate_continuation_from_history(hist_df, assessment["item"])
         assessment["item"].update(pred)
+        item = assessment["item"]
+        # 獨立搜尋也補上簡易族群資訊與入選理由，避免卡片資訊不完整
+        if vault and isinstance(vault, dict):
+            cdf = vault.get("candidate_df")
+            if cdf is not None and not getattr(cdf, "empty", False) and "industry" in cdf.columns:
+                ind = str(item.get("產業", "其他") or "其他")
+                base = cdf.copy()
+                base["_industry"] = base["industry"].fillna("其他").replace("", "其他")
+                hs = base.get("high", pd.Series([0]*len(base), index=base.index)).astype(float)
+                ls = base.get("low", pd.Series([0]*len(base), index=base.index)).astype(float)
+                lasts = base.get("last", pd.Series([0]*len(base), index=base.index)).astype(float)
+                cps = ((lasts-ls)/(hs-ls).clip(lower=1e-9)).clip(lower=0.0, upper=1.0)
+                rm = (
+                    (base.get("change_pct", pd.Series([0]*len(base), index=base.index)).astype(float) >= (1.8 if not is_test else 0.9)) &
+                    (base.get("dist", pd.Series([99]*len(base), index=base.index)).astype(float) <= (4.8 if not is_test else 6.0)) &
+                    (base.get("vol_sh", pd.Series([0]*len(base), index=base.index)).astype(float) >= (450000 if not is_test else 220000)) &
+                    (cps >= (0.76 if not is_test else 0.68))
+                )
+                total_n = int((base["_industry"] == ind).sum()) if ind else 1
+                rise_n = int(((base["_industry"] == ind) & rm).sum()) if ind else 0
+                if rise_n >= 1:
+                    item["族群狀態"] = f"同族群跟漲 {rise_n} 檔"
+                elif total_n >= 2:
+                    item["族群狀態"] = f"同族群 {total_n} 檔｜未同步"
+                else:
+                    item["族群狀態"] = "一支獨秀"
+                item["同族群跟漲數"] = rise_n
+                item["族群共振分數"] = 3.2 if rise_n >=4 else 2.5 if rise_n==3 else 1.7 if rise_n==2 else 0.9 if rise_n==1 else 0.0
+        item["入選理由"] = build_reason_tags(item)
 
     return {
         "ok": True,
@@ -1492,6 +1521,22 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         diag["final_count"] = 0
         return pd.DataFrame(), stats, diag
 
+    # 先用候選池計算「同族群一起轉強」數，後面直接吃進主評分與分級
+    industry_col = work["industry"].fillna("其他").replace("", "其他") if "industry" in work.columns else pd.Series(["其他"] * len(work), index=work.index)
+    industry_counts = industry_col.value_counts()
+    high_s = work.get("high", pd.Series([0] * len(work), index=work.index)).astype(float)
+    low_s = work.get("low", pd.Series([0] * len(work), index=work.index)).astype(float)
+    last_s = work.get("last", pd.Series([0] * len(work), index=work.index)).astype(float)
+    rng_s = (high_s - low_s).clip(lower=1e-9)
+    close_pos_s = ((last_s - low_s) / rng_s).clip(lower=0.0, upper=1.0)
+    rising_mask = (
+        (work.get("change_pct", pd.Series([0] * len(work), index=work.index)).astype(float) >= (1.8 if not is_test else 0.9)) &
+        (work.get("dist", pd.Series([99] * len(work), index=work.index)).astype(float) <= (4.8 if not is_test else 6.0)) &
+        (work.get("vol_sh", pd.Series([0] * len(work), index=work.index)).astype(float) >= (450000 if not is_test else 220000)) &
+        (close_pos_s >= (0.76 if not is_test else 0.68))
+    )
+    industry_rising = industry_col[rising_mask].value_counts()
+
     out = []
     for _, r in work.iterrows():
         assessment = evaluate_candidate_record(
@@ -1513,6 +1558,30 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             continue
         item = assessment.get("item")
         if item:
+            ind = str(item.get("產業", "其他") or "其他")
+            rise_n = int(industry_rising.get(ind, 0)) if len(industry_rising) else 0
+            total_n = int(industry_counts.get(ind, 1)) if len(industry_counts) else 1
+            if rise_n >= 1:
+                cluster_status = f"同族群跟漲 {rise_n} 檔"
+            elif total_n >= 2:
+                cluster_status = f"同族群 {total_n} 檔｜未同步"
+            else:
+                cluster_status = "一支獨秀"
+            if rise_n >= 4:
+                cluster_score = 3.2
+            elif rise_n == 3:
+                cluster_score = 2.5
+            elif rise_n == 2:
+                cluster_score = 1.7
+            elif rise_n == 1:
+                cluster_score = 0.9
+            else:
+                cluster_score = 0.0
+            item["同產業檔數"] = total_n
+            item["同族群跟漲數"] = rise_n
+            item["族群狀態"] = cluster_status
+            item["族群共振分數"] = cluster_score
+
             # 順手把風險映射到統計區，方便看哪一類偏多，但不淘汰
             flag_text = str(item.get("風險標記", ""))
             if "熱度不足" in flag_text:
@@ -1537,10 +1606,15 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         if "起漲雷達分數" not in res.columns:
             res["起漲雷達分數"] = 0.0
 
+        if "族群共振分數" not in res.columns:
+            res["族群共振分數"] = 0.0
+        if "同族群跟漲數" not in res.columns:
+            res["同族群跟漲數"] = 0
         res["模式排序分"] = (
             res["今日表現分數"].astype(float)
-            + res["起漲雷達分數"].astype(float) * 0.68
-            - res["風險數"].astype(float) * 0.38
+            + res["起漲雷達分數"].astype(float) * 0.72
+            + res["族群共振分數"].astype(float) * 0.42
+            - res["風險數"].astype(float) * 0.40
         )
 
         if use_bloodline:
@@ -1574,6 +1648,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
         def _tier(row):
             s = float(row["今日表現分數"])
+            mode_s = float(row.get("模式排序分", s))
             rsk = int(row["風險數"])
             radar_s = float(row.get("起漲雷達分數", 0.0))
             chg = float(row.get("漲幅%", 0.0))
@@ -1581,14 +1656,30 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             heat = float(row.get("交易熱度", 0.0))
             cp = float(row.get("close_pos", 0.0))
             board = int(row.get("board_val", 0))
+            cluster_s = float(row.get("族群共振分數", 0.0))
+            rising_n = int(row.get("同族群跟漲數", 0))
+            breakout_s = float(row.get("突破區間分數", 0.0))
+            vol_lift = float(row.get("量能抬升比", 1.0))
 
             blood_a_ok = (board >= 1) or (not use_bloodline)
             blood_b_ok = (board >= 1) or (not use_bloodline) or (radar_s >= 4.4 and s >= b_score + 0.45)
 
-            if s >= a_score and rsk <= a_risk and chg >= (3.6 if is_test else 4.0) and heat >= (0.95 if is_test else 1.15) and cp >= (0.74 if is_test else 0.78) and blood_a_ok:
+            if mode_s >= (a_score + 1.1 if not is_test else a_score + 0.7) and s >= a_score and rsk <= a_risk and chg >= (3.6 if is_test else 4.0) and heat >= (0.95 if is_test else 1.15) and cp >= (0.74 if is_test else 0.78) and blood_a_ok:
                 return "A級焦點"
 
-            if radar_s >= (3.3 if is_test else 3.7) and s >= max(4.6 if is_test else 4.9, b_score - 0.35) and rsk <= min(b_risk, 4 if not is_test else 5) and dist <= (5.2 if is_test else 4.4) and 0.4 <= chg <= 9.5 and cp >= (0.66 if is_test else 0.72) and blood_b_ok:
+            if (
+                radar_s >= (3.45 if is_test else 3.85)
+                and mode_s >= (6.4 if is_test else 6.9)
+                and s >= max(4.7 if is_test else 5.0, b_score - 0.20)
+                and rsk <= min(b_risk, 4 if not is_test else 5)
+                and dist <= (5.0 if is_test else 4.2)
+                and 0.3 <= chg <= 9.8
+                and cp >= (0.68 if is_test else 0.74)
+                and vol_lift >= (1.05 if is_test else 1.10)
+                and breakout_s >= (0.80 if is_test else 0.95)
+                and (cluster_s >= (0.8 if is_test else 0.9) or rising_n >= 1 or radar_s >= 4.8)
+                and blood_b_ok
+            ):
                 return "B級觀察"
 
             # C 級要像真正候補，不要太像小 B 級；放寬模式下再稍微鬆一點
@@ -1618,7 +1709,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 1:
             reserve_idx = (
                 res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]
-                .sort_values(["突破區間分數", "起漲雷達分數", "量能抬升比", "今日表現分數"], ascending=[False, False, False, False])
+                .sort_values(["突破區間分數", "族群共振分數", "起漲雷達分數", "量能抬升比", "今日表現分數"], ascending=[False, False, False, False, False])
                 .head(1)
                 .index
             )
@@ -1630,13 +1721,13 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             c_candidates = c_candidates[
                 (c_candidates["起漲雷達分數"] >= 1.8) &
                 (c_candidates["漲幅%"] >= 0.1) &
-                (c_candidates["交易熱度"] >= 0.70)
+                (c_candidates["交易熱度"] >= 0.72)
             ]
         else:
             c_candidates = c_candidates[
                 (c_candidates["起漲雷達分數"] >= 1.7) &
                 (c_candidates["漲幅%"] >= 0.0) &
-                (c_candidates["交易熱度"] >= 0.65)
+                (c_candidates["交易熱度"] >= 0.70)
             ]
 
         c_keep_idx = (
@@ -2611,52 +2702,16 @@ if "raw_data_vault_v12" in st.session_state:
             res["模式分級"] = "C級候補"
 
     if not res.empty:
-        industry_col = res["產業"].fillna("其他").replace("", "其他") if "產業" in res.columns else pd.Series(["其他"] * len(res))
-        industry_counts = industry_col.value_counts()
-        res["同產業檔數"] = industry_col.map(industry_counts).fillna(1).astype(int)
-
-        base_df = vault.get("candidate_df", pd.DataFrame()).copy() if isinstance(vault, dict) else pd.DataFrame()
-        if not base_df.empty and "industry" in base_df.columns:
-            base_df["_industry"] = base_df["industry"].fillna("其他").replace("", "其他")
-            # 同族群一起漲：不是只算同產業有幾檔，而是有幾檔同產業也同步轉強
-            high_s = base_df.get("high", pd.Series([0] * len(base_df))).astype(float)
-            low_s = base_df.get("low", pd.Series([0] * len(base_df))).astype(float)
-            last_s = base_df.get("last", pd.Series([0] * len(base_df))).astype(float)
-            rng_s = (high_s - low_s).clip(lower=1e-9)
-            close_pos_s = ((last_s - low_s) / rng_s).clip(lower=0.0, upper=1.0)
-            rising_mask = (
-                (base_df.get("change_pct", 0).astype(float) >= (1.2 if not is_test else 0.6)) &
-                (base_df.get("dist", 99).astype(float) <= (5.2 if not is_test else 6.2)) &
-                (base_df.get("vol_sh", 0).astype(float) >= (350000 if not is_test else 180000)) &
-                (close_pos_s >= (0.70 if not is_test else 0.64))
-            )
-            industry_rising = base_df.loc[rising_mask, "_industry"].value_counts()
+        if "入選理由" not in res.columns:
+            res["入選理由"] = res.apply(build_reason_tags, axis=1)
         else:
-            industry_rising = pd.Series(dtype=int)
-
-        res["同族群跟漲數"] = industry_col.map(industry_rising).fillna(0).astype(int)
-        def _cluster_status(row):
-            total_n = int(row.get("同產業檔數", 1))
-            rise_n = int(row.get("同族群跟漲數", 0))
-            if rise_n >= 1:
-                return f"同族群跟漲 {rise_n} 檔"
-            if total_n >= 2:
-                return f"同族群 {total_n} 檔｜未同步"
-            return "一支獨秀"
-        res["族群狀態"] = res.apply(_cluster_status, axis=1)
-        def _cluster_score(n):
-            n = int(n)
-            if n >= 4:
-                return 3.0
-            if n == 3:
-                return 2.4
-            if n == 2:
-                return 1.6
-            if n == 1:
-                return 0.8
-            return 0.0
-        res["族群共振分數"] = res["同族群跟漲數"].apply(_cluster_score)
-        res["入選理由"] = res.apply(build_reason_tags, axis=1)
+            res["入選理由"] = res.apply(build_reason_tags, axis=1)
+        # 族群共振在這一版正式吃進主評分後，再依新分數重排一次
+        if "模式排序分" in res.columns:
+            res = res.sort_values(
+                ["模式分級", "模式排序分", "今日表現分數", "起漲雷達分數"],
+                ascending=[True, False, False, False]
+            ).reset_index(drop=True)
 
     a_df = res[res["模式分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
     b_df = res[res["模式分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
