@@ -22,7 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 基本設定
 # ============================================================
 APP_TITLE = "起漲戰情室 OMEGA"
-APP_SUBTITLE = "v12.0 極速版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
+APP_SUBTITLE = "v12.1 平衡修正版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
@@ -682,20 +682,41 @@ def intraday_progress_fraction(now_ts):
 def get_thresholds(now_ts, is_test=False):
     m = int((datetime.combine(now_ts.date(), now_ts.time()) - datetime.combine(now_ts.date(), dtime(9, 0))).total_seconds() // 60)
     m = max(0, min(270, m))
+
     if is_test:
-        return {"dist_limit": 100.0, "vol_limit": 0, "pullback_lim": 1.0, "close_pos_min": 0.0, "vol_ratio_min": 0.0}
+        if m <= 60:
+            pullback_lim = 0.025
+            dist_limit = 5.5
+        elif m <= 180:
+            pullback_lim = 0.018
+            dist_limit = 4.6
+        else:
+            pullback_lim = 0.012
+            dist_limit = 3.6
+        return {
+            "dist_limit": dist_limit,
+            "vol_limit": 200_000,
+            "pullback_lim": pullback_lim,
+            "close_pos_min": 0.60,
+            "vol_ratio_min": 0.85,
+        }
+
     if m <= 60:
-        dist_limit = 3.2
+        dist_limit = 4.0
+        pullback_lim = 0.018
     elif m <= 180:
-        dist_limit = 2.2
+        dist_limit = 3.0
+        pullback_lim = 0.012
     else:
-        dist_limit = 1.5
+        dist_limit = 2.2
+        pullback_lim = 0.008
+
     return {
         "dist_limit": dist_limit,
-        "vol_limit": 800_000,
-        "pullback_lim": 0.012 if m <= 90 else 0.0042,
-        "close_pos_min": 0.80,
-        "vol_ratio_min": 1.30,
+        "vol_limit": 500_000,
+        "pullback_lim": pullback_lim,
+        "close_pos_min": 0.72,
+        "vol_ratio_min": 1.10,
     }
 
 
@@ -877,16 +898,30 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
 
     score = 0.0
-    score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.4))
+    score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.1))
     score += min(3.0, max(0.0, vol_ratio_live - 1.0))
-    score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.85 else 0.0
-    score += min(2.0, board_streak * 0.9)
+    score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.82 else 0.0
+    score += min(1.6, board_streak * 0.8)
     score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
     score += 0.4 if ret5 > 0 else 0.0
     score += 0.4 if ret20 > 0 else 0.0
+
+    bloodline_note = ""
+    if use_bloodline:
+        if board_streak >= max(2, min_board + 1):
+            score += 0.8
+            bloodline_note = "｜血統強"
+        elif board_streak >= min_board:
+            score += 0.4
+            bloodline_note = "｜血統穩"
+        else:
+            score -= 0.55 if not is_test else 0.15
+            bloodline_note = "｜新起漲"
+
     signal_score = min(10.0, round(score, 2))
 
     status = "🔒 漲到頂買不到" if hard_locked else "🟣 快漲到最高價" if near_limit else "⚡ 強力上漲中"
+    status = f"{status}{bloodline_note}"
     star_count = score_to_star_count(
         signal_score=signal_score,
         dist_pct=r["dist"],
@@ -931,10 +966,8 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     if pullback > th["pullback_lim"]:
         return {"passed": False, "reason_key": "從高點掉下來太多", "reason_text": "目前價格已經從今天最高點掉落太多", "item": item}
     if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
-        return {"passed": False, "reason_key": "目前價格相對弱勢", "reason_text": "今天收盤位置處在相對不夠強勢的地方", "item": item}
-    if use_bloodline and not is_test and board_streak < min_board:
-        return {"passed": False, "reason_key": "過去沒有連續大漲紀錄", "reason_text": f"過去連續大漲不到 {min_board} 天", "item": item}
-    return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有嚴格條件", "item": item}
+        return {"passed": False, "reason_key": "目前價格相對弱勢", "reason_text": "今天價格位置看起來不夠強", "item": item}
+    return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有條件", "item": item}
 
 
 # ============================================================
@@ -1465,7 +1498,7 @@ def render_backtest_table(display_df: pd.DataFrame):
 
     body_rows = []
     for _, row in display_df.iterrows():
-        ret = float(row["獲利報酬%"]) if pd.notna(row["獲利報酬%"]) else 0.0
+        ret = float(row["獲利報酬%"] ) if pd.notna(row["獲利報酬%"] ) else 0.0
         if ret >= 6:
             ret_class = "ret-strong"
         elif ret > 0:
@@ -1891,9 +1924,9 @@ with st.container():
     st.markdown('<div class="glass-row">', unsafe_allow_html=True)
     cfg1, cfg2, cfg3 = st.columns([1.2, 1.2, 1.0])
     with cfg1:
-        is_test = st.toggle("🔥 放寬標準模式", value=False, help="降低篩選標準，方便看到更多可能的機會。")
+        is_test = st.toggle("🔥 放寬標準模式", value=False, help="現在改成真的只是放寬，不再是幾乎全部放行。")
     with cfg2:
-        use_bloodline = st.toggle("🛡️ 連續大漲篩選", value=True, help="只挑選過去曾經連續大漲的股票，避開表現平庸的。")
+        use_bloodline = st.toggle("🛡️ 連續大漲加分", value=True, help="會更看重過去曾連續大漲的股票，但不再直接一刀砍掉新起漲股。")
     with cfg3:
         only_tse = False
     min_board = DEFAULT_MIN_BOARD
@@ -2088,7 +2121,7 @@ if "raw_data_vault_v12" in st.session_state:
     final_diag["t_backtest"] = time.perf_counter() - bt_t0
 
     ts = vault["ts"]
-    state_str = f"放寬模式 {'開啟' if is_test else '關閉'} ｜ 連續大漲篩選 {'開啟' if use_bloodline else '關閉'}"
+    state_str = f"放寬模式 {'開啟' if is_test else '關閉'} ｜ 連續大漲加分 {'開啟' if use_bloodline else '關閉'}"
     st.markdown(
         f"<div class='soft-note'>資料時間：{ts.strftime('%Y-%m-%d %H:%M:%S')}（台灣時間）｜{state_str}｜重新篩選只花：{final_diag['t_filter']:.3f}秒</div>",
         unsafe_allow_html=True,
