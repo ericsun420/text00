@@ -28,11 +28,11 @@ API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
 RAW_HISTORY_DAYS = 420
 DEFAULT_COOLDOWN_SECONDS = 45
-DEFAULT_TOP_VOLUME = 100
-DEFAULT_TOP_MOVERS = 50
+DEFAULT_TOP_VOLUME = 180
+DEFAULT_TOP_MOVERS = 120
 DEFAULT_MIN_BOARD = 1
 DEFAULT_HOLD_DAYS = 5
-MAX_CANDIDATES = 140
+MAX_CANDIDATES = 260
 FINAL_ENRICH_LIMIT = 18
 YF_DOWNLOAD_CHUNK = 45
 
@@ -646,16 +646,22 @@ def compute_feature_cache(candidate_df, meta_dict, diag, status_placeholder, per
             prev_close_hist = safe_float(close.iloc[-1], 0.0)
             atr20 = safe_float((high - low).rolling(20).mean().iloc[-1], 0.0)
             ret5 = safe_float((close.iloc[-1] / close.iloc[-6] - 1) * 100.0, 0.0) if len(close) >= 6 and close.iloc[-6] > 0 else 0.0
+            ret10 = safe_float((close.iloc[-1] / close.iloc[-11] - 1) * 100.0, 0.0) if len(close) >= 11 and close.iloc[-11] > 0 else 0.0
             ret20 = safe_float((close.iloc[-1] / close.iloc[-21] - 1) * 100.0, 0.0) if len(close) >= 21 and close.iloc[-21] > 0 else 0.0
+            range20_pct = safe_float(((high.tail(20).max() - low.tail(20).min()) / max(close.iloc[-1], 1e-9)) * 100.0, 0.0) if len(close) >= 20 else 0.0
+            vol_ma5 = safe_float(vol.rolling(5).mean().iloc[-1], 0.0)
 
             features[code] = {
                 "vol_ma20": vol_ma20,
+                "vol_ma5": vol_ma5,
                 "high_52w": high_52w,
                 "board_streak": board_streak,
                 "prev_close_hist": prev_close_hist,
                 "atr20": atr20,
                 "ret5": ret5,
+                "ret10": ret10,
                 "ret20": ret20,
+                "range20_pct": range20_pct,
             }
             diag["feature_ok"] += 1
         except Exception as e:
@@ -793,7 +799,10 @@ def compute_feature_from_history(df, today_date):
         "prev_close_hist": safe_float(close.iloc[-1], 0.0),
         "atr20": safe_float((high - low).rolling(20).mean().iloc[-1], 0.0),
         "ret5": safe_float((close.iloc[-1] / close.iloc[-6] - 1) * 100.0, 0.0) if len(close) >= 6 and close.iloc[-6] > 0 else 0.0,
+        "ret10": safe_float((close.iloc[-1] / close.iloc[-11] - 1) * 100.0, 0.0) if len(close) >= 11 and close.iloc[-11] > 0 else 0.0,
         "ret20": safe_float((close.iloc[-1] / close.iloc[-21] - 1) * 100.0, 0.0) if len(close) >= 21 and close.iloc[-21] > 0 else 0.0,
+        "range20_pct": safe_float(((high.tail(20).max() - low.tail(20).min()) / max(close.iloc[-1], 1e-9)) * 100.0, 0.0) if len(close) >= 20 else 0.0,
+        "vol_ma5": safe_float(vol.rolling(5).mean().iloc[-1], 0.0),
     }
 
 
@@ -881,7 +890,10 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     board_streak = safe_int(feat.get("board_streak"), 0)
     high_52w = safe_float(feat.get("high_52w"), 0.0)
     ret5 = safe_float(feat.get("ret5"), 0.0)
+    ret10 = safe_float(feat.get("ret10"), 0.0)
     ret20 = safe_float(feat.get("ret20"), 0.0)
+    range20_pct = safe_float(feat.get("range20_pct"), 0.0)
+    vol_ma5 = safe_float(feat.get("vol_ma5"), 0.0)
 
     # 沒有均量時，用今天成交量做保守基準，避免 vol_ratio 爆掉或直接淘汰
     if vol_ma20 <= 0:
@@ -995,6 +1007,18 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     if ret20 > 0 or ret5 > 0:
         breakout_score += 0.45
 
+    # 整理後剛突破：近 20 天震幅不大、20 天漲幅不誇張、但近 5~10 天開始抬頭
+    if 0 < ret20 <= 12 and ret5 >= 1.2 and range20_pct <= 18:
+        breakout_score += 1.15
+    elif -3 <= ret20 <= 8 and ret10 >= 2.0 and range20_pct <= 14:
+        breakout_score += 0.85
+
+    # 最近 5 天均量比 20 天均量明顯抬升，代表剛開始被注意到
+    if vol_ma20 > 0 and vol_ma5 / max(vol_ma20, 1e-9) >= 1.25:
+        breakout_score += 0.65
+    elif vol_ma20 > 0 and vol_ma5 / max(vol_ma20, 1e-9) >= 1.10:
+        breakout_score += 0.30
+
     if board_streak == 0:
         breakout_score += 0.35
     elif board_streak >= 2:
@@ -1047,6 +1071,10 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "風險數": int(risk_count),
         "風險標記": "、".join(risk_flags) if risk_flags else "低風險",
         "起漲雷達分數": breakout_score,
+        "整理區間20日%": range20_pct,
+        "近10天表現%": ret10,
+        "量能抬升比": round(vol_ma5 / max(vol_ma20, 1e-9), 2) if vol_ma20 > 0 else 1.0,
+        "保底補位": "",
     }
 
     # 只保留極少數硬淘汰：市場不符已在前面處理，這裡基本都進榜
@@ -1456,14 +1484,14 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         res["分級"] = res.apply(_tier, axis=1)
         res["模式分級"] = res["分級"]
 
-        # A 沒有時，保底補最強一檔；B 沒有時，補最像第一根的前兩檔
+        # A 不強制一定要有；真的沒有時只補一檔，並標記為保底補位
         if (res["分級"] == "A級焦點").sum() == 0 and len(res) >= 1:
             top_idx = res.sort_values(["今日表現分數", "起漲雷達分數"], ascending=[False, False]).head(1).index
-            res.loc[top_idx, ["分級", "模式分級"]] = ["A級焦點", "A級焦點"]
+            res.loc[top_idx, ["分級", "模式分級", "保底補位"]] = ["A級焦點", "A級焦點", "A保底"]
 
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
             reserve_idx = res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]                 .sort_values(["起漲雷達分數", "今日表現分數", "交易熱度"], ascending=[False, False, False])                 .head(2).index
-            res.loc[reserve_idx, ["分級", "模式分級"]] = ["B級觀察", "B級觀察"]
+            res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底"]
 
         # C 不是垃圾桶：只留真正還有起漲味道的前 8 檔
         c_candidates = res[(res["分級"] == "C級候補") | (res["分級"] == "排除")].copy()
@@ -1482,10 +1510,10 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 # ============================================================
 # 歷史模擬驗證
 # ============================================================
-def pick_backtest_universe(raw_df, top_n=16):
+def pick_backtest_universe(raw_df, top_n=28):
     if raw_df is None or raw_df.empty:
         return []
-    df = raw_df.sort_values(["dist", "vol_sh"], ascending=[True, False]).head(top_n)
+    df = raw_df.sort_values(["change_pct", "vol_sh", "dist"], ascending=[False, False, True]).head(top_n)
     return df["code"].tolist()
 
 
@@ -1537,13 +1565,27 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
             board_list[i] = streak
         df["board_streak"] = board_list
 
+        # 盡量貼近現在 B/C 邏輯：不只抓爆衝，也抓整理後剛抬頭
+        df["dist_pct"] = 0.0
+        for i in range(1, len(df)):
+            prev_close = safe_float(df["Close"].iloc[i-1], 0.0)
+            close_now = safe_float(df["Close"].iloc[i], 0.0)
+            if prev_close > 0 and close_now > 0:
+                upper = calc_limit_up(prev_close)
+                df.iloc[i, df.columns.get_loc("dist_pct")] = max(0.0, (upper - close_now) / max(upper, 1e-9) * 100.0)
+        ret5 = (df["Close"] / df["Close"].shift(5) - 1.0) * 100.0
+        ret20 = (df["Close"] / df["Close"].shift(20) - 1.0) * 100.0
+        range20_pct = ((df["High"].rolling(20).max() - df["Low"].rolling(20).min()) / df["Close"].replace(0, pd.NA)) * 100.0
         signal = (
-            (df["chg_pct"] >= 7.0)
-            & (df["vol_ratio"] >= 1.8)
-            & (df["close_pos"] >= 0.80)
+            (df["chg_pct"] >= 1.5)
+            & (df["vol_ratio"] >= 1.15)
+            & (df["close_pos"] >= 0.68)
+            & (df["dist_pct"] <= 5.0)
+            & (ret5 >= 0.8)
+            & (range20_pct <= 22)
         )
         if use_bloodline:
-            signal &= df["board_streak"] >= min_board
+            signal &= (df["board_streak"] >= min_board) | ((ret20 <= 12) & (ret20 >= -3))
 
         sig_idx = df.index[signal.fillna(False)].tolist()
         for idx in sig_idx:
@@ -2301,7 +2343,7 @@ if "raw_data_vault_v12" in st.session_state:
     final_diag["t_filter"] = time.perf_counter() - t_filter
 
     bt_t0 = time.perf_counter()
-    bt_universe = pick_backtest_universe(vault["candidate_df"], top_n=16)
+    bt_universe = pick_backtest_universe(vault["candidate_df"], top_n=28)
     bt_df, bt_stats = run_surrogate_backtest(
         raw_daily=vault["raw_daily"],
         universe_codes=bt_universe,
@@ -2360,19 +2402,25 @@ if "raw_data_vault_v12" in st.session_state:
     b_df = res[res["模式分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
     c_df = res[res["模式分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
 
-    st.caption(f"目前分布｜A級 {len(a_df)} 檔 ｜ B級 {len(b_df)} 檔 ｜ C級 {len(c_df)} 檔")
+    fallback_badges = []
+    if not a_df.empty and "保底補位" in a_df.columns and (a_df["保底補位"] != "").any():
+        fallback_badges.append("A 含保底補位")
+    if not b_df.empty and "保底補位" in b_df.columns and (b_df["保底補位"] != "").any():
+        fallback_badges.append("B 含保底補位")
+    extra_note = f"｜{' / '.join(fallback_badges)}" if fallback_badges else ""
+    st.caption(f"目前分布｜A級 {len(a_df)} 檔 ｜ B級 {len(b_df)} 檔 ｜ C級 {len(c_df)} 檔{extra_note}")
 
     st.subheader("A級焦點")
     render_stock_cards(a_df, "今天暫時沒有衝到 A 級焦點的股票。")
 
     st.markdown("<hr>", unsafe_allow_html=True)
     st.subheader("B級觀察")
-    st.caption("這區是最接近你要的『起漲第一根 / 準發動』核心名單。")
+    st.caption("這區是最接近你要的『起漲第一根 / 準發動』核心名單，優先看這區。")
     render_stock_cards(b_df, "今天暫時沒有落在 B 級觀察的股票。")
 
     st.markdown("<hr>", unsafe_allow_html=True)
     st.subheader("C級候補")
-    st.caption("這區不再把剩下全部股票都塞進來，只保留少量仍有起漲味道的候補。")
+    st.caption("這區不再把剩下全部股票都塞進來，只保留少量仍有起漲味道、但還需要再確認的候補。")
     render_stock_cards(c_df, "今天暫時沒有落在 C 級候補的股票。")
 
     with st.expander("🧪 歷史模擬測試 (過去126天)", expanded=False):
