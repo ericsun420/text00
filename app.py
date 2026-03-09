@@ -4,7 +4,6 @@ import math
 import os
 import re
 import time
-import textwrap
 from copy import deepcopy
 from datetime import datetime, timedelta, time as dtime, timezone
 from collections import deque
@@ -686,38 +685,38 @@ def get_thresholds(now_ts, is_test=False):
 
     if is_test:
         if m <= 60:
-            pullback_lim = 0.025
-            dist_limit = 5.5
+            pullback_lim = 0.032
+            dist_limit = 6.5
         elif m <= 180:
-            pullback_lim = 0.018
-            dist_limit = 4.6
+            pullback_lim = 0.024
+            dist_limit = 5.3
         else:
-            pullback_lim = 0.012
-            dist_limit = 3.6
+            pullback_lim = 0.018
+            dist_limit = 4.2
         return {
             "dist_limit": dist_limit,
-            "vol_limit": 200_000,
+            "vol_limit": 120_000,
             "pullback_lim": pullback_lim,
-            "close_pos_min": 0.60,
-            "vol_ratio_min": 0.85,
+            "close_pos_min": 0.52,
+            "vol_ratio_min": 0.72,
         }
 
     if m <= 60:
-        dist_limit = 4.0
-        pullback_lim = 0.018
+        dist_limit = 4.8
+        pullback_lim = 0.022
     elif m <= 180:
-        dist_limit = 3.0
-        pullback_lim = 0.012
+        dist_limit = 3.8
+        pullback_lim = 0.015
     else:
-        dist_limit = 2.2
-        pullback_lim = 0.008
+        dist_limit = 2.8
+        pullback_lim = 0.010
 
     return {
         "dist_limit": dist_limit,
-        "vol_limit": 500_000,
+        "vol_limit": 350_000,
         "pullback_lim": pullback_lim,
-        "close_pos_min": 0.72,
-        "vol_ratio_min": 1.10,
+        "close_pos_min": 0.68,
+        "vol_ratio_min": 0.98,
     }
 
 
@@ -899,10 +898,10 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
 
     score = 0.0
-    score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.1))
-    score += min(3.0, max(0.0, vol_ratio_live - 1.0))
-    score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.82 else 0.0
-    score += min(1.6, board_streak * 0.8)
+    score += min(3.0, max(0.0, 3.2 - r["dist"] * 0.95))
+    score += min(3.0, max(0.0, vol_ratio_live - 0.85))
+    score += 1.0 if close_pos >= 0.90 else 0.6 if close_pos >= 0.78 else 0.2 if close_pos >= 0.62 else 0.0
+    score += min(1.4, board_streak * 0.7)
     score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
     score += 0.4 if ret5 > 0 else 0.0
     score += 0.4 if ret20 > 0 else 0.0
@@ -910,16 +909,38 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     bloodline_note = ""
     if use_bloodline:
         if board_streak >= max(2, min_board + 1):
-            score += 0.8
+            score += 0.7
             bloodline_note = "｜血統強"
         elif board_streak >= min_board:
-            score += 0.4
+            score += 0.35
             bloodline_note = "｜血統穩"
         else:
-            score -= 0.55 if not is_test else 0.15
+            score -= 0.25 if not is_test else 0.08
             bloodline_note = "｜新起漲"
 
-    signal_score = min(10.0, round(score, 2))
+    weak_reason = None
+    soft_penalty = 0.0
+    relaxed_vol_ratio_floor = max(0.60, th["vol_ratio_min"] * 0.72)
+    hard_pullback_lim = th["pullback_lim"] * 1.8
+    hard_close_pos_floor = max(0.38, th["close_pos_min"] - 0.22)
+
+    if vol_ratio_live < relaxed_vol_ratio_floor:
+        weak_reason = ("買賣不夠熱絡", "即時的交易熱度真的偏弱")
+    elif vol_ratio_live < th["vol_ratio_min"]:
+        soft_penalty += 0.55
+
+    if pullback > hard_pullback_lim:
+        weak_reason = ("從高點掉下來太多", "目前價格已經從今天最高點掉落太多")
+    elif pullback > th["pullback_lim"]:
+        soft_penalty += min(0.9, (pullback - th["pullback_lim"]) * 35.0)
+
+    if close_pos < hard_close_pos_floor and rng > max(0.1, r["last"] * 0.002):
+        weak_reason = ("目前價格相對弱勢", "今天價格位置看起來真的偏弱")
+    elif close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
+        soft_penalty += 0.45
+
+    score -= soft_penalty
+    signal_score = max(0.0, min(10.0, round(score, 2)))
 
     status = "🔒 漲到頂買不到" if hard_locked else "🟣 快漲到最高價" if near_limit else "⚡ 強力上漲中"
     status = f"{status}{bloodline_note}"
@@ -962,12 +983,8 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
 
     if r["dist"] > th["dist_limit"] or r["vol_sh"] < th["vol_limit"]:
         return {"passed": False, "reason_key": "未達基本熱門門檻", "reason_text": "未達到基本篩選條件", "item": item}
-    if vol_ratio_live < th["vol_ratio_min"]:
-        return {"passed": False, "reason_key": "買賣不夠熱絡", "reason_text": "即時的交易熱度不夠", "item": item}
-    if pullback > th["pullback_lim"]:
-        return {"passed": False, "reason_key": "從高點掉下來太多", "reason_text": "目前價格已經從今天最高點掉落太多", "item": item}
-    if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
-        return {"passed": False, "reason_key": "目前價格相對弱勢", "reason_text": "今天價格位置看起來不夠強", "item": item}
+    if weak_reason:
+        return {"passed": False, "reason_key": weak_reason[0], "reason_text": weak_reason[1], "item": item}
     return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有條件", "item": item}
 
 
@@ -1574,7 +1591,7 @@ def render_search_result_box(search_result):
     badge_cls = "search-good" if passed else "search-warn"
     badge_text = "順利通過當前條件" if passed else f"沒有通過｜{assess.get('reason_text', '表現未達標準')}"
 
-    html_block = textwrap.dedent(f"""
+    html_block = f"""
     <div class='search-panel'>
       <div class='search-head-row'>
         <div>
@@ -1589,8 +1606,10 @@ def render_search_result_box(search_result):
         <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))}</div>
         <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
         <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
+
         <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
         <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
+
         <div class='card-stars-wrap'>
           <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
           <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
@@ -1605,7 +1624,7 @@ def render_search_result_box(search_result):
         </div>
       </div>
     </div>
-    """).strip()
+    """
     st.markdown(html_block, unsafe_allow_html=True)
 
 
