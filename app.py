@@ -4,6 +4,7 @@ import math
 import os
 import re
 import time
+import textwrap
 from copy import deepcopy
 from datetime import datetime, timedelta, time as dtime, timezone
 from collections import deque
@@ -1573,7 +1574,7 @@ def render_search_result_box(search_result):
     badge_cls = "search-good" if passed else "search-warn"
     badge_text = "順利通過當前條件" if passed else f"沒有通過｜{assess.get('reason_text', '表現未達標準')}"
 
-    html_block = f"""
+    html_block = textwrap.dedent(f"""
     <div class='search-panel'>
       <div class='search-head-row'>
         <div>
@@ -1588,10 +1589,8 @@ def render_search_result_box(search_result):
         <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))}</div>
         <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
         <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
-
         <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
         <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
-
         <div class='card-stars-wrap'>
           <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
           <div class='card-stars-badge'>推薦 {int(safe_int(item.get('推薦星等', 1), 1))}/5</div>
@@ -1606,7 +1605,7 @@ def render_search_result_box(search_result):
         </div>
       </div>
     </div>
-    """
+    """).strip()
     st.markdown(html_block, unsafe_allow_html=True)
 
 
