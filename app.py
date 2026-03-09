@@ -966,6 +966,47 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
 
     signal_score = max(0.0, min(10.0, round(score, 2)))
 
+    breakout_score = 0.0
+    if vol_ratio_live >= 1.15:
+        breakout_score += 1.2
+    elif vol_ratio_live >= 0.95:
+        breakout_score += 0.6
+
+    if close_pos >= 0.82:
+        breakout_score += 1.0
+    elif close_pos >= 0.70:
+        breakout_score += 0.45
+
+    if r["dist"] <= 2.8:
+        breakout_score += 1.0
+    elif r["dist"] <= 4.2:
+        breakout_score += 0.45
+
+    if safe_float(r.get("change_pct", 0.0), 0.0) >= 4.0:
+        breakout_score += 0.9
+    elif safe_float(r.get("change_pct", 0.0), 0.0) >= 1.5:
+        breakout_score += 0.45
+
+    if proximity_52w >= 85:
+        breakout_score += 0.6
+    elif proximity_52w >= 78:
+        breakout_score += 0.3
+
+    if ret20 > 0 or ret5 > 0:
+        breakout_score += 0.45
+
+    if board_streak == 0:
+        breakout_score += 0.35
+    elif board_streak >= 2:
+        breakout_score -= 0.15
+
+    if hist_missing:
+        breakout_score -= 0.25
+    if pullback > th["pullback_lim"]:
+        breakout_score -= 0.35
+
+    breakout_score = max(0.0, round(breakout_score, 2))
+
     status = "🔒 漲到頂買不到" if hard_locked else "🟣 快漲到最高價" if near_limit else "⚡ 強力上漲中"
     status = f"{status}{bloodline_note}"
     star_count = score_to_star_count(
@@ -1005,6 +1046,7 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "成交量": safe_int(r.get("vol_sh", 0), 0),
         "風險數": int(risk_count),
         "風險標記": "、".join(risk_flags) if risk_flags else "低風險",
+        "起漲雷達分數": breakout_score,
     }
 
     # 只保留極少數硬淘汰：市場不符已在前面處理，這裡基本都進榜
@@ -1390,28 +1432,45 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             a_score, a_risk = 6.8, 2
             b_score, b_risk = 5.4, 4
 
+        if "起漲雷達分數" not in res.columns:
+            res["起漲雷達分數"] = 0.0
+        radar = res["起漲雷達分數"].astype(float)
+
         def _tier(row):
             s = float(row["今日表現分數"])
             rsk = int(row["風險數"])
-            if s >= a_score and rsk <= a_risk:
+            radar_s = float(row.get("起漲雷達分數", 0.0))
+            chg = float(row.get("漲幅%", 0.0))
+            dist = float(row.get("距離最高價%", 99.0))
+            heat = float(row.get("交易熱度", 0.0))
+            cp = float(row.get("close_pos", 0.0))
+
+            if s >= a_score and rsk <= a_risk and chg >= 4.0 and heat >= 1.15 and cp >= 0.78:
                 return "A級焦點"
-            if s >= b_score and rsk <= b_risk:
+            if radar_s >= 3.4 and s >= max(4.8, b_score - 0.4) and rsk <= b_risk and dist <= 4.8 and chg >= 1.5 and cp >= 0.68:
                 return "B級觀察"
-            return "C級候補"
+            if radar_s >= 2.5 and heat >= 0.95 and dist <= 5.8 and chg >= 0.8:
+                return "C級候補"
+            return "排除"
 
         res["分級"] = res.apply(_tier, axis=1)
         res["模式分級"] = res["分級"]
 
-        # 保底：至少 A/B/C 都看得到，但不會太強硬覆蓋
+        # A 沒有時，保底補最強一檔；B 沒有時，補最像第一根的前兩檔
         if (res["分級"] == "A級焦點").sum() == 0 and len(res) >= 1:
-            top_idx = res["今日表現分數"].idxmax()
+            top_idx = res.sort_values(["今日表現分數", "起漲雷達分數"], ascending=[False, False]).head(1).index
             res.loc[top_idx, ["分級", "模式分級"]] = ["A級焦點", "A級焦點"]
+
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
-            reserve_idx = res[~res.index.isin(res[res["分級"] == "A級焦點"].index)].head(2).index
+            reserve_idx = res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]                 .sort_values(["起漲雷達分數", "今日表現分數", "交易熱度"], ascending=[False, False, False])                 .head(2).index
             res.loc[reserve_idx, ["分級", "模式分級"]] = ["B級觀察", "B級觀察"]
-        if (res["分級"] == "C級候補").sum() == 0 and len(res) >= 3:
-            reserve_idx = res[~res.index.isin(res[res["分級"].isin(["A級焦點", "B級觀察"])].index)].head(3).index
-            res.loc[reserve_idx, ["分級", "模式分級"]] = ["C級候補", "C級候補"]
+
+        # C 不是垃圾桶：只留真正還有起漲味道的前 8 檔
+        c_candidates = res[(res["分級"] == "C級候補") | (res["分級"] == "排除")].copy()
+        c_candidates = c_candidates[(c_candidates["起漲雷達分數"] >= 2.2) & (c_candidates["漲幅%"] >= 0.5) & (c_candidates["交易熱度"] >= 0.85)]
+        c_keep_idx = c_candidates.sort_values(["起漲雷達分數", "今日表現分數", "交易熱度", "距離最高價%"], ascending=[False, False, False, True]).head(8).index
+        res.loc[res.index.isin(c_keep_idx), ["分級", "模式分級"]] = ["C級候補", "C級候補"]
+        res.loc[(~res.index.isin(c_keep_idx)) & (~res["分級"].isin(["A級焦點", "B級觀察"])), ["分級", "模式分級"]] = ["排除", "排除"]
     else:
         res = pd.DataFrame(columns=["分級", "模式分級"])
 
@@ -2301,15 +2360,19 @@ if "raw_data_vault_v12" in st.session_state:
     b_df = res[res["模式分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
     c_df = res[res["模式分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
 
+    st.caption(f"目前分布｜A級 {len(a_df)} 檔 ｜ B級 {len(b_df)} 檔 ｜ C級 {len(c_df)} 檔")
+
     st.subheader("A級焦點")
     render_stock_cards(a_df, "今天暫時沒有衝到 A 級焦點的股票。")
 
     st.markdown("<hr>", unsafe_allow_html=True)
     st.subheader("B級觀察")
+    st.caption("這區是最接近你要的『起漲第一根 / 準發動』核心名單。")
     render_stock_cards(b_df, "今天暫時沒有落在 B 級觀察的股票。")
 
     st.markdown("<hr>", unsafe_allow_html=True)
     st.subheader("C級候補")
+    st.caption("這區不再把剩下全部股票都塞進來，只保留少量仍有起漲味道的候補。")
     render_stock_cards(c_df, "今天暫時沒有落在 C 級候補的股票。")
 
     with st.expander("🧪 歷史模擬測試 (過去126天)", expanded=False):
