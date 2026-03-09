@@ -1477,7 +1477,14 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
                 return "A級焦點"
             if radar_s >= 3.4 and s >= max(4.8, b_score - 0.4) and rsk <= b_risk and dist <= 4.8 and chg >= 1.5 and cp >= 0.68:
                 return "B級觀察"
-            if radar_s >= 2.5 and heat >= 0.95 and dist <= 5.8 and chg >= 0.8:
+
+            # C 級要像真正候補，不要太像小 B 級；放寬模式下再稍微鬆一點
+            if is_test:
+                c_radar_min, c_heat_min, c_dist_max, c_chg_min = 2.1, 0.80, 6.8, 0.3
+            else:
+                c_radar_min, c_heat_min, c_dist_max, c_chg_min = 2.0, 0.78, 6.8, 0.2
+
+            if radar_s >= c_radar_min and heat >= c_heat_min and dist <= c_dist_max and chg >= c_chg_min:
                 return "C級候補"
             return "排除"
 
@@ -1490,15 +1497,56 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             res.loc[top_idx, ["分級", "模式分級", "保底補位"]] = ["A級焦點", "A級焦點", "A保底"]
 
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
-            reserve_idx = res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]                 .sort_values(["起漲雷達分數", "今日表現分數", "交易熱度"], ascending=[False, False, False])                 .head(2).index
+            reserve_idx = (
+                res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]
+                .sort_values(["起漲雷達分數", "今日表現分數", "交易熱度"], ascending=[False, False, False])
+                .head(2)
+                .index
+            )
             res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底"]
 
-        # C 不是垃圾桶：只留真正還有起漲味道的前 8 檔
+        # C 不是垃圾桶：只留真正還有起漲味道的前 8 檔，但如果完全沒有，補少量 C 保底
         c_candidates = res[(res["分級"] == "C級候補") | (res["分級"] == "排除")].copy()
-        c_candidates = c_candidates[(c_candidates["起漲雷達分數"] >= 2.2) & (c_candidates["漲幅%"] >= 0.5) & (c_candidates["交易熱度"] >= 0.85)]
-        c_keep_idx = c_candidates.sort_values(["起漲雷達分數", "今日表現分數", "交易熱度", "距離最高價%"], ascending=[False, False, False, True]).head(8).index
-        res.loc[res.index.isin(c_keep_idx), ["分級", "模式分級"]] = ["C級候補", "C級候補"]
-        res.loc[(~res.index.isin(c_keep_idx)) & (~res["分級"].isin(["A級焦點", "B級觀察"])), ["分級", "模式分級"]] = ["排除", "排除"]
+        if is_test:
+            c_candidates = c_candidates[
+                (c_candidates["起漲雷達分數"] >= 1.8) &
+                (c_candidates["漲幅%"] >= 0.1) &
+                (c_candidates["交易熱度"] >= 0.70)
+            ]
+        else:
+            c_candidates = c_candidates[
+                (c_candidates["起漲雷達分數"] >= 1.7) &
+                (c_candidates["漲幅%"] >= 0.0) &
+                (c_candidates["交易熱度"] >= 0.65)
+            ]
+
+        c_keep_idx = (
+            c_candidates.sort_values(
+                ["起漲雷達分數", "今日表現分數", "交易熱度", "距離最高價%"],
+                ascending=[False, False, False, True]
+            )
+            .head(8)
+            .index
+        )
+
+        if len(c_keep_idx) == 0:
+            fallback_pool = res[~res["分級"].isin(["A級焦點", "B級觀察"])].copy()
+            fallback_idx = (
+                fallback_pool.sort_values(
+                    ["起漲雷達分數", "今日表現分數", "交易熱度", "距離最高價%"],
+                    ascending=[False, False, False, True]
+                )
+                .head(3)
+                .index
+            )
+            res.loc[fallback_idx, ["分級", "模式分級", "保底補位"]] = ["C級候補", "C級候補", "C保底"]
+        else:
+            res.loc[res.index.isin(c_keep_idx), ["分級", "模式分級"]] = ["C級候補", "C級候補"]
+
+        res.loc[
+            (~res["分級"].isin(["A級焦點", "B級觀察", "C級候補"])),
+            ["分級", "模式分級"]
+        ] = ["排除", "排除"]
     else:
         res = pd.DataFrame(columns=["分級", "模式分級"])
 
