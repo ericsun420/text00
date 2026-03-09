@@ -22,7 +22,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 基本設定
 # ============================================================
 APP_TITLE = "起漲戰情室 OMEGA"
-APP_SUBTITLE = "v12.1 平衡修正版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
+APP_SUBTITLE = "v12.2 開關強化版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
@@ -947,16 +947,22 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     bloodline_note = ""
     if use_bloodline:
         if board_streak >= max(2, min_board + 1):
-            score += 0.6
+            score += 0.9
             bloodline_note = "｜血統強"
         elif board_streak >= min_board:
-            score += 0.25
+            score += 0.45
             bloodline_note = "｜血統穩"
         else:
-            score -= 0.2 if not is_test else 0.05
+            score -= 0.45 if not is_test else 0.18
             risk_flags.append("血統偏弱")
             risk_count += 1
             bloodline_note = "｜新起漲"
+
+    if is_test:
+        score += 0.4
+        risk_count = max(0, risk_count - 1)
+        if risk_flags:
+            risk_flags = risk_flags[:-1]
 
     signal_score = max(0.0, min(10.0, round(score, 2)))
 
@@ -1377,29 +1383,35 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         score = res["今日表現分數"].astype(float)
         risk = res["風險數"].astype(int)
 
+        if is_test:
+            a_score, a_risk = 6.2, 3
+            b_score, b_risk = 4.8, 5
+        else:
+            a_score, a_risk = 6.8, 2
+            b_score, b_risk = 5.4, 4
+
         def _tier(row):
             s = float(row["今日表現分數"])
             rsk = int(row["風險數"])
-            if s >= 7.0 and rsk <= 2:
-                return "困難"
-            if s >= 5.2 and rsk <= 4:
-                return "平常"
-            return "寬鬆"
+            if s >= a_score and rsk <= a_risk:
+                return "A級焦點"
+            if s >= b_score and rsk <= b_risk:
+                return "B級觀察"
+            return "C級候補"
 
-        res["模式分級"] = res.apply(_tier, axis=1)
-        # 相容舊 UI 命名
-        res["分級"] = res["模式分級"].map({"困難": "A級焦點", "平常": "B級觀察", "寬鬆": "C級候補"})
+        res["分級"] = res.apply(_tier, axis=1)
+        res["模式分級"] = res["分級"]
 
-        # 保底：三種模式至少各有內容
-        if (res["模式分級"] == "困難").sum() == 0 and len(res) >= 1:
+        # 保底：至少 A/B/C 都看得到，但不會太強硬覆蓋
+        if (res["分級"] == "A級焦點").sum() == 0 and len(res) >= 1:
             top_idx = res["今日表現分數"].idxmax()
-            res.loc[top_idx, ["模式分級", "分級"]] = ["困難", "A級焦點"]
-        if (res["模式分級"] == "平常").sum() == 0 and len(res) >= 2:
-            reserve_idx = res[~res.index.isin(res[res["模式分級"] == "困難"].index)].head(2).index
-            res.loc[reserve_idx, ["模式分級", "分級"]] = ["平常", "B級觀察"]
-        if (res["模式分級"] == "寬鬆").sum() == 0 and len(res) >= 3:
-            reserve_idx = res[~res.index.isin(res[res["模式分級"].isin(["困難", "平常"])].index)].head(3).index
-            res.loc[reserve_idx, ["模式分級", "分級"]] = ["寬鬆", "C級候補"]
+            res.loc[top_idx, ["分級", "模式分級"]] = ["A級焦點", "A級焦點"]
+        if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
+            reserve_idx = res[~res.index.isin(res[res["分級"] == "A級焦點"].index)].head(2).index
+            res.loc[reserve_idx, ["分級", "模式分級"]] = ["B級觀察", "B級觀察"]
+        if (res["分級"] == "C級候補").sum() == 0 and len(res) >= 3:
+            reserve_idx = res[~res.index.isin(res[res["分級"].isin(["A級焦點", "B級觀察"])].index)].head(3).index
+            res.loc[reserve_idx, ["分級", "模式分級"]] = ["C級候補", "C級候補"]
     else:
         res = pd.DataFrame(columns=["分級", "模式分級"])
 
@@ -2281,24 +2293,24 @@ if "raw_data_vault_v12" in st.session_state:
 
     if not res.empty and "模式分級" not in res.columns:
         if "分級" in res.columns:
-            res["模式分級"] = res["分級"].map({"A級焦點": "困難", "B級觀察": "平常", "C級候補": "寬鬆"}).fillna("寬鬆")
+            res["模式分級"] = res["分級"].fillna("C級候補")
         else:
-            res["模式分級"] = "寬鬆"
+            res["模式分級"] = "C級候補"
 
-    hard_df = res[res["模式分級"] == "困難"].copy() if not res.empty else pd.DataFrame()
-    normal_df = res[res["模式分級"] == "平常"].copy() if not res.empty else pd.DataFrame()
-    easy_df = res[res["模式分級"] == "寬鬆"].copy() if not res.empty else pd.DataFrame()
+    a_df = res[res["模式分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
+    b_df = res[res["模式分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
+    c_df = res[res["模式分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
 
-    st.subheader("困難模式")
-    render_stock_cards(hard_df, "今天暫時沒有衝到困難模式的股票。")
-
-    st.markdown("<hr>", unsafe_allow_html=True)
-    st.subheader("平常模式")
-    render_stock_cards(normal_df, "今天暫時沒有落在平常模式的股票。")
+    st.subheader("A級焦點")
+    render_stock_cards(a_df, "今天暫時沒有衝到 A 級焦點的股票。")
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.subheader("寬鬆模式")
-    render_stock_cards(easy_df, "今天暫時沒有落在寬鬆模式的股票。")
+    st.subheader("B級觀察")
+    render_stock_cards(b_df, "今天暫時沒有落在 B 級觀察的股票。")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("C級候補")
+    render_stock_cards(c_df, "今天暫時沒有落在 C 級候補的股票。")
 
     with st.expander("🧪 歷史模擬測試 (過去126天)", expanded=False):
         st.caption("這個功能是拿過去 126 天的資料來算算看，如果照這套嚴格標準來找股票勝率如何。這只是模擬，不保證未來一定賺錢喔。")
