@@ -1137,6 +1137,7 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "風險數": int(risk_count),
         "風險標記": "、".join(risk_flags) if risk_flags else "低風險",
         "起漲雷達分數": breakout_score,
+        "突破區間分數": round((1.2 if (0 < ret20 <= 12 and ret5 >= 1.2 and range20_pct <= 18) else 0.85 if (-3 <= ret20 <= 8 and ret10 >= 2.0 and range20_pct <= 14) else 0.0), 2),
         "整理區間20日%": range20_pct,
         "近10天表現%": ret10,
         "量能抬升比": round(vol_ma5 / max(vol_ma20, 1e-9), 2) if vol_ma20 > 0 else 1.0,
@@ -1568,11 +1569,11 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
                     top_idx = top_pick.index
                     res.loc[top_idx, ["分級", "模式分級", "保底補位"]] = ["A級焦點", "A級焦點", "A保底"]
 
-        if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
+        if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 1:
             reserve_idx = (
                 res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]
                 .sort_values(["起漲雷達分數", "今日表現分數", "交易熱度"], ascending=[False, False, False])
-                .head(2)
+                .head(1)
                 .index
             )
             res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底"]
@@ -1860,24 +1861,31 @@ def render_backtest_table(display_df: pd.DataFrame):
 
 def build_reason_tags(row):
     tags = []
-    if safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 4.0:
+    if safe_float(row.get("突破區間分數", 0.0), 0.0) >= 1.2:
+        tags.append("突破整理上緣")
+    elif safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 4.0:
         tags.append("整理後突破")
     elif safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 3.0:
         tags.append("準突破")
+
     if safe_float(row.get("量能抬升比", 1.0), 1.0) >= 1.25:
         tags.append("量能抬升")
     if safe_float(row.get("close_pos", 0.0), 0.0) >= 0.82:
         tags.append("收在高檔")
     if safe_float(row.get("近20天表現%", 0.0), 0.0) > 0 and safe_float(row.get("近5天表現%", 0.0), 0.0) > 0:
         tags.append("趨勢翻正")
-    if safe_int(row.get("同產業檔數", 1), 1) >= 3:
+
+    rising = safe_int(row.get("同族群跟漲數", 0), 0)
+    if rising >= 3:
         tags.append("族群共振")
-    elif safe_int(row.get("同產業檔數", 1), 1) == 2:
-        tags.append("同族群跟漲")
+    elif rising >= 1:
+        tags.append("族群跟漲")
+    else:
+        tags.append("單兵觀察")
+
     if row.get("保底補位", ""):
         tags.append(str(row.get("保底補位")))
     return "｜".join(tags[:4]) if tags else "先看分數與位置"
-
 
 def render_search_result_box(search_result):
     if not search_result:
@@ -2553,8 +2561,31 @@ if "raw_data_vault_v12" in st.session_state:
         industry_col = res["產業"].fillna("其他").replace("", "其他") if "產業" in res.columns else pd.Series(["其他"] * len(res))
         industry_counts = industry_col.value_counts()
         res["同產業檔數"] = industry_col.map(industry_counts).fillna(1).astype(int)
-        res["族群狀態"] = res["同產業檔數"].apply(lambda n: f"同族群 {int(n)} 檔" if int(n) >= 2 else "一支獨秀")
-        res["族群共振分數"] = res["同產業檔數"].apply(lambda n: round(min(2.0, max(0, int(n)-1) * 0.6), 2))
+
+        base_df = vault.get("candidate_df", pd.DataFrame()).copy() if isinstance(vault, dict) else pd.DataFrame()
+        if not base_df.empty and "industry" in base_df.columns:
+            base_df["_industry"] = base_df["industry"].fillna("其他").replace("", "其他")
+            # 同族群一起漲：不是只算同產業有幾檔，而是有幾檔同產業也同步轉強
+            rising_mask = (
+                (base_df.get("change_pct", 0).astype(float) >= (0.8 if not is_test else 0.3)) &
+                (base_df.get("dist", 99).astype(float) <= (6.0 if not is_test else 7.0)) &
+                (base_df.get("vol_sh", 0).astype(float) >= (300000 if not is_test else 150000))
+            )
+            industry_rising = base_df.loc[rising_mask, "_industry"].value_counts()
+        else:
+            industry_rising = pd.Series(dtype=int)
+
+        res["同族群跟漲數"] = industry_col.map(industry_rising).fillna(0).astype(int)
+        def _cluster_status(row):
+            total_n = int(row.get("同產業檔數", 1))
+            rise_n = int(row.get("同族群跟漲數", 0))
+            if rise_n >= 1:
+                return f"同族群跟漲 {rise_n} 檔"
+            if total_n >= 2:
+                return f"同族群 {total_n} 檔｜未同步"
+            return "一支獨秀"
+        res["族群狀態"] = res.apply(_cluster_status, axis=1)
+        res["族群共振分數"] = res["同族群跟漲數"].apply(lambda n: round(min(3.0, max(0, int(n)) * 0.85), 2))
         res["入選理由"] = res.apply(build_reason_tags, axis=1)
 
     a_df = res[res["模式分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
@@ -2569,14 +2600,12 @@ if "raw_data_vault_v12" in st.session_state:
     extra_note = f"｜{' / '.join(fallback_badges)}" if fallback_badges else ""
     st.caption(f"目前分布｜A級 {len(a_df)} 檔 ｜ B級 {len(b_df)} 檔 ｜ C級 {len(c_df)} 檔{extra_note}")
     if not res.empty and "產業" in res.columns:
-        industry_top = (
-            res[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"])]
-            .assign(_industry=res["產業"].fillna("其他").replace("", "其他"))
-            .groupby("_industry").size().sort_values(ascending=False)
-        )
-        strong_groups = [f"{ind} {cnt}檔" for ind, cnt in industry_top.items() if cnt >= 2][:4]
-        if strong_groups:
-            st.caption("同產業同步發動｜" + " / ".join(strong_groups))
+        group_df = res[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"])].copy()
+        if not group_df.empty:
+            industry_top = group_df.groupby("產業")["同族群跟漲數"].max().sort_values(ascending=False)
+            strong_groups = [f"{ind} 跟漲{cnt}檔" for ind, cnt in industry_top.items() if cnt >= 1][:4]
+            if strong_groups:
+                st.caption("同產業同步發動｜" + " / ".join(strong_groups))
 
     st.subheader("A級焦點")
     render_stock_cards(a_df, "今天暫時沒有衝到 A 級焦點的股票。")
