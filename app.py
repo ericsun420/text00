@@ -873,20 +873,25 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     market = r.get("market", "上市")
     if only_tse and market != "上市":
         return {"passed": False, "reason_key": "市場不符", "reason_text": "目前設定只看上市", "item": None}
-    if not feat:
-        return {"passed": False, "reason_key": "資訊不足", "reason_text": "缺少過去的表現資料", "item": None}
 
+    # 歷史資料不足時不要整支淘汰，先用保守預設值降級處理
+    hist_missing = feat is None
+    feat = feat or {}
     vol_ma20 = safe_float(feat.get("vol_ma20"), 0.0)
     board_streak = safe_int(feat.get("board_streak"), 0)
     high_52w = safe_float(feat.get("high_52w"), 0.0)
     ret5 = safe_float(feat.get("ret5"), 0.0)
     ret20 = safe_float(feat.get("ret20"), 0.0)
+
+    # 沒有均量時，用今天成交量做保守基準，避免 vol_ratio 爆掉或直接淘汰
     if vol_ma20 <= 0:
-        return {"passed": False, "reason_key": "資訊不足", "reason_text": "過去 20 天的交易量資料不足", "item": None}
+        vol_ma20 = max(safe_float(r.get("vol_sh", 0), 0.0), 1.0)
+        hist_missing = True
 
     th = get_thresholds(now_ts, is_test=is_test)
     frac = intraday_progress_fraction(now_ts)
-    vol_ratio_live = r["vol_sh"] / max(vol_ma20 * (1.0 if is_test else frac), 1e-9)
+    base_vol = max(vol_ma20 * (1.0 if is_test else frac), 1e-9)
+    vol_ratio_live = r["vol_sh"] / base_vol
     rng = max(r["high"] - r["low"], 0.0)
     pullback = (r["high"] - r["last"]) / max(r["high"], 1e-9)
     close_pos = 1.0 if rng < 1e-9 else (r["last"] - r["low"]) / max(rng, 1e-9)
@@ -898,27 +903,62 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
 
     score = 0.0
-    score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.1))
-    score += min(3.0, max(0.0, vol_ratio_live - 1.0))
-    score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.82 else 0.0
-    score += min(1.6, board_streak * 0.8)
-    score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
-    score += 0.4 if ret5 > 0 else 0.0
-    score += 0.4 if ret20 > 0 else 0.0
+    score += min(3.2, max(0.0, 3.2 - r["dist"] * 0.85))
+    score += min(3.0, max(0.0, vol_ratio_live - 0.85))
+    score += 1.1 if close_pos >= 0.92 else 0.6 if close_pos >= 0.78 else 0.2 if close_pos >= 0.62 else 0.0
+    score += min(1.2, board_streak * 0.55)
+    score += 0.9 if proximity_52w >= 95 else 0.5 if proximity_52w >= 88 else 0.0
+    score += 0.35 if ret5 > 0 else 0.0
+    score += 0.35 if ret20 > 0 else 0.0
+
+    risk_flags = []
+    risk_count = 0
+
+    if hist_missing:
+        score -= 0.55
+        risk_count += 1
+        risk_flags.append("歷史不足")
+
+    if r["dist"] > th["dist_limit"]:
+        score -= min(1.0, (r["dist"] - th["dist_limit"]) * 0.45)
+        risk_count += 1
+        risk_flags.append("離高點偏遠")
+
+    if r["vol_sh"] < th["vol_limit"]:
+        score -= 0.7
+        risk_count += 1
+        risk_flags.append("成交量偏低")
+
+    if vol_ratio_live < th["vol_ratio_min"]:
+        score -= min(1.0, (th["vol_ratio_min"] - vol_ratio_live) * 1.1)
+        risk_count += 1
+        risk_flags.append("熱度不足")
+
+    if pullback > th["pullback_lim"]:
+        score -= min(1.1, (pullback - th["pullback_lim"]) * 28)
+        risk_count += 1
+        risk_flags.append("回落偏大")
+
+    if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
+        score -= min(0.9, (th["close_pos_min"] - close_pos) * 2.2)
+        risk_count += 1
+        risk_flags.append("收在偏低")
 
     bloodline_note = ""
     if use_bloodline:
         if board_streak >= max(2, min_board + 1):
-            score += 0.8
+            score += 0.6
             bloodline_note = "｜血統強"
         elif board_streak >= min_board:
-            score += 0.4
+            score += 0.25
             bloodline_note = "｜血統穩"
         else:
-            score -= 0.55 if not is_test else 0.15
+            score -= 0.2 if not is_test else 0.05
+            risk_flags.append("血統偏弱")
+            risk_count += 1
             bloodline_note = "｜新起漲"
 
-    signal_score = min(10.0, round(score, 2))
+    signal_score = max(0.0, min(10.0, round(score, 2)))
 
     status = "🔒 漲到頂買不到" if hard_locked else "🟣 快漲到最高價" if near_limit else "⚡ 強力上漲中"
     status = f"{status}{bloodline_note}"
@@ -957,17 +997,12 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "best_ask": safe_float(r.get("best_ask", 0.0), 0.0),
         "best_ask_size": safe_int(r.get("best_ask_size", 0), 0),
         "成交量": safe_int(r.get("vol_sh", 0), 0),
+        "風險數": int(risk_count),
+        "風險標記": "、".join(risk_flags) if risk_flags else "低風險",
     }
 
-    if r["dist"] > th["dist_limit"] or r["vol_sh"] < th["vol_limit"]:
-        return {"passed": False, "reason_key": "未達基本熱門門檻", "reason_text": "未達到基本篩選條件", "item": item}
-    if vol_ratio_live < th["vol_ratio_min"]:
-        return {"passed": False, "reason_key": "買賣不夠熱絡", "reason_text": "即時的交易熱度不夠", "item": item}
-    if pullback > th["pullback_lim"]:
-        return {"passed": False, "reason_key": "從高點掉下來太多", "reason_text": "目前價格已經從今天最高點掉落太多", "item": item}
-    if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
-        return {"passed": False, "reason_key": "目前價格相對弱勢", "reason_text": "今天價格位置看起來不夠強", "item": item}
-    return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有條件", "item": item}
+    # 只保留極少數硬淘汰：市場不符已在前面處理，這裡基本都進榜
+    return {"passed": True, "reason_key": "通過", "reason_text": item["風險標記"], "item": item}
 
 
 # ============================================================
@@ -1312,7 +1347,23 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             if reason_key == "資訊不足":
                 diag["yf_fail"] += 1
             continue
-        out.append(assessment["item"])
+        item = assessment.get("item")
+        if item:
+            # 順手把風險映射到統計區，方便看哪一類偏多，但不淘汰
+            flag_text = str(item.get("風險標記", ""))
+            if "熱度不足" in flag_text:
+                stats["買賣不夠熱絡"].append(f"{r['code']} {r['name']}")
+            if "回落偏大" in flag_text:
+                stats["從高點掉下來太多"].append(f"{r['code']} {r['name']}")
+            if "收在偏低" in flag_text:
+                stats["目前價格相對弱勢"].append(f"{r['code']} {r['name']}")
+            if "血統偏弱" in flag_text:
+                stats["過去沒有連續大漲紀錄"].append(f"{r['code']} {r['name']}")
+            if "歷史不足" in flag_text:
+                stats["資訊不足"].append(f"{r['code']} {r['name']}")
+            if "離高點偏遠" in flag_text or "成交量偏低" in flag_text:
+                stats["未達基本熱門門檻"].append(f"{r['code']} {r['name']}")
+            out.append(item)
 
     res = pd.DataFrame(out)
     if not res.empty:
@@ -1321,41 +1372,39 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             ascending=[False, False, False, False, True],
         ).reset_index(drop=True)
 
+        if "風險數" not in res.columns:
+            res["風險數"] = 0
         score = res["今日表現分數"].astype(float)
         risk = res["風險數"].astype(int)
 
         def _tier(row):
             s = float(row["今日表現分數"])
             rsk = int(row["風險數"])
-            if s >= 7.0 and rsk <= 1:
-                return "A級焦點"
-            if s >= 5.6 and rsk <= 2:
-                return "B級觀察"
-            if s >= 3.8:
-                return "C級候補"
-            return "保底觀察"
+            if s >= 7.0 and rsk <= 2:
+                return "困難"
+            if s >= 5.2 and rsk <= 4:
+                return "平常"
+            return "寬鬆"
 
-        res["分級"] = res.apply(_tier, axis=1)
+        res["模式分級"] = res.apply(_tier, axis=1)
+        # 相容舊 UI 命名
+        res["分級"] = res["模式分級"].map({"困難": "A級焦點", "平常": "B級觀察", "寬鬆": "C級候補"})
 
-        # 保底：避免整片空白，但不扭曲太多
-        if not (res["分級"] == "A級焦點").any():
+        # 保底：三種模式至少各有內容
+        if (res["模式分級"] == "困難").sum() == 0 and len(res) >= 1:
             top_idx = res["今日表現分數"].idxmax()
-            res.loc[top_idx, "分級"] = "A級焦點"
-
-        if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
-            reserve_idx = res[res["分級"].isin(["C級候補", "保底觀察"])].head(2).index
-            res.loc[reserve_idx, "分級"] = "B級觀察"
-
-        if (res["分級"] == "C級候補").sum() == 0 and len(res) >= 3:
-            reserve_idx = res[~res["分級"].isin(["A級焦點", "B級觀察"])].head(3).index
-            res.loc[reserve_idx, "分級"] = "C級候補"
-
+            res.loc[top_idx, ["模式分級", "分級"]] = ["困難", "A級焦點"]
+        if (res["模式分級"] == "平常").sum() == 0 and len(res) >= 2:
+            reserve_idx = res[~res.index.isin(res[res["模式分級"] == "困難"].index)].head(2).index
+            res.loc[reserve_idx, ["模式分級", "分級"]] = ["平常", "B級觀察"]
+        if (res["模式分級"] == "寬鬆").sum() == 0 and len(res) >= 3:
+            reserve_idx = res[~res.index.isin(res[res["模式分級"].isin(["困難", "平常"])].index)].head(3).index
+            res.loc[reserve_idx, ["模式分級", "分級"]] = ["寬鬆", "C級候補"]
     else:
-        res["分級"] = pd.Series(dtype=str)
+        res = pd.DataFrame(columns=["分級", "模式分級"])
 
     diag["final_count"] = len(res)
     return res, stats, diag
-
 
 
 
@@ -2230,29 +2279,26 @@ if "raw_data_vault_v12" in st.session_state:
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    if not res.empty and "分級" not in res.columns:
-        res["分級"] = "C級候補"
+    if not res.empty and "模式分級" not in res.columns:
+        if "分級" in res.columns:
+            res["模式分級"] = res["分級"].map({"A級焦點": "困難", "B級觀察": "平常", "C級候補": "寬鬆"}).fillna("寬鬆")
+        else:
+            res["模式分級"] = "寬鬆"
 
-    a_df = res[res["分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
-    b_df = res[res["分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
-    c_df = res[res["分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
-    keep_df = res[res["分級"] == "保底觀察"].copy() if not res.empty else pd.DataFrame()
+    hard_df = res[res["模式分級"] == "困難"].copy() if not res.empty else pd.DataFrame()
+    normal_df = res[res["模式分級"] == "平常"].copy() if not res.empty else pd.DataFrame()
+    easy_df = res[res["模式分級"] == "寬鬆"].copy() if not res.empty else pd.DataFrame()
 
-    st.subheader("A級焦點股")
-    render_stock_cards(a_df, "今天暫時沒有衝到 A 級的股票。")
-
-    st.markdown("<hr>", unsafe_allow_html=True)
-    st.subheader("B級觀察股")
-    render_stock_cards(b_df, "今天暫時沒有落在 B 級的股票。")
+    st.subheader("困難模式")
+    render_stock_cards(hard_df, "今天暫時沒有衝到困難模式的股票。")
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.subheader("C級候補股")
-    render_stock_cards(c_df, "今天暫時沒有落在 C 級的股票。")
+    st.subheader("平常模式")
+    render_stock_cards(normal_df, "今天暫時沒有落在平常模式的股票。")
 
-    if not keep_df.empty:
-        st.markdown("<hr>", unsafe_allow_html=True)
-        st.subheader("保底觀察")
-        render_stock_cards(keep_df, "今天沒有保底觀察名單。")
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("寬鬆模式")
+    render_stock_cards(easy_df, "今天暫時沒有落在寬鬆模式的股票。")
 
     with st.expander("🧪 歷史模擬測試 (過去126天)", expanded=False):
         st.caption("這個功能是拿過去 126 天的資料來算算看，如果照這套嚴格標準來找股票勝率如何。這只是模擬，不保證未來一定賺錢喔。")
