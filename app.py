@@ -135,17 +135,20 @@ def get_stock_list():
             c_col = cols.get("code") or df.columns[1]
             n_col = cols.get("name") or df.columns[2]
             t_col = cols.get("type")
+            g_col = cols.get("group") or cols.get("industry") or cols.get("category")
             for _, row in df.iterrows():
                 stype = str(row.get(t_col, "")) if t_col else ""
+                raw_group = str(row.get(g_col, "")) if g_col else ""
                 if t_col and ("ETF" in stype or "權證" in stype or "受益證券" in stype):
                     continue
                 code = str(row.get(c_col, "")).strip()
                 if len(code) == 4 and code.isdigit():
+                    industry_raw = raw_group if raw_group and raw_group != "nan" else ""
                     meta[code] = {
                         "name": str(row.get(n_col, "")).strip(),
                         "ex": ex,
                         "market": "上市" if ex == "tse" else "上櫃",
-                        "industry": normalize_industry(stype),
+                        "industry": normalize_industry(industry_raw),
                     }
         except Exception as e:
             errors.append(f"{ex}: {e}")
@@ -274,33 +277,56 @@ def copy_diag(diag):
 
 def normalize_industry(raw: str) -> str:
     s = str(raw or "").strip()
-    if not s:
+    if not s or s.lower() == "nan":
         return "其他"
-    s = s.replace("業", "") if s.endswith("業") and len(s) <= 6 else s
+    if s in ["股票", "common stock", "commonstock"]:
+        return "其他"
+    s = s.replace("業", "") if s.endswith("業") and len(s) <= 8 else s
     alias = {
         "半導體": "半導體",
         "電子零組件": "電子零組件",
+        "電子零組件業": "電子零組件",
         "電腦及週邊設備": "電腦週邊",
         "電腦及週邊": "電腦週邊",
+        "電腦及週邊設備業": "電腦週邊",
         "光電": "光電",
+        "光電業": "光電",
         "通信網路": "通信網路",
+        "通信網路業": "通信網路",
         "電子通路": "電子通路",
+        "電子通路業": "電子通路",
         "其他電子": "其他電子",
+        "其他電子業": "其他電子",
         "資訊服務": "資訊服務",
+        "資訊服務業": "資訊服務",
         "生技醫療": "生技醫療",
+        "生技醫療業": "生技醫療",
         "電機機械": "電機機械",
+        "電機機械業": "電機機械",
         "航運": "航運",
+        "航運業": "航運",
         "鋼鐵": "鋼鐵",
+        "鋼鐵業": "鋼鐵",
         "塑膠": "塑膠",
+        "塑膠業": "塑膠",
         "建材營造": "營建",
+        "建材營造業": "營建",
         "食品": "食品",
+        "食品業": "食品",
         "金融保險": "金融保險",
+        "金融保險業": "金融保險",
         "貿易百貨": "貿易百貨",
+        "貿易百貨業": "貿易百貨",
         "油電燃氣": "油電燃氣",
+        "油電燃氣業": "油電燃氣",
         "紡織纖維": "紡織纖維",
+        "紡織纖維業": "紡織纖維",
         "居家生活": "居家生活",
+        "居家生活業": "居家生活",
         "觀光餐旅": "觀光餐旅",
+        "觀光餐旅業": "觀光餐旅",
         "綠能環保": "綠能環保",
+        "綠能環保業": "綠能環保",
         "數位雲端": "數位雲端",
         "運動休閒": "運動休閒",
     }
@@ -1531,10 +1557,16 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         res["分級"] = res.apply(_tier, axis=1)
         res["模式分級"] = res["分級"]
 
-        # A 不強制一定要有；真的沒有時只補一檔，並標記為保底補位
+        # A 保底弱化：只有最高分真的夠強時才補，不強求一定要有 A
         if (res["分級"] == "A級焦點").sum() == 0 and len(res) >= 1:
-            top_idx = res.sort_values(["今日表現分數", "起漲雷達分數"], ascending=[False, False]).head(1).index
-            res.loc[top_idx, ["分級", "模式分級", "保底補位"]] = ["A級焦點", "A級焦點", "A保底"]
+            top_pick = res.sort_values(["今日表現分數", "起漲雷達分數"], ascending=[False, False]).head(1).copy()
+            if not top_pick.empty:
+                top_score = safe_float(top_pick["今日表現分數"].iloc[0], 0.0)
+                top_radar = safe_float(top_pick["起漲雷達分數"].iloc[0], 0.0)
+                top_risk = safe_int(top_pick["風險數"].iloc[0], 9)
+                if top_score >= max(6.3, a_score - 0.2) and top_radar >= 3.8 and top_risk <= a_risk + 1:
+                    top_idx = top_pick.index
+                    res.loc[top_idx, ["分級", "模式分級", "保底補位"]] = ["A級焦點", "A級焦點", "A保底"]
 
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
             reserve_idx = (
@@ -1826,6 +1858,27 @@ def render_backtest_table(display_df: pd.DataFrame):
     st.markdown(table_html, unsafe_allow_html=True)
 
 
+def build_reason_tags(row):
+    tags = []
+    if safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 4.0:
+        tags.append("整理後突破")
+    elif safe_float(row.get("起漲雷達分數", 0.0), 0.0) >= 3.0:
+        tags.append("準突破")
+    if safe_float(row.get("量能抬升比", 1.0), 1.0) >= 1.25:
+        tags.append("量能抬升")
+    if safe_float(row.get("close_pos", 0.0), 0.0) >= 0.82:
+        tags.append("收在高檔")
+    if safe_float(row.get("近20天表現%", 0.0), 0.0) > 0 and safe_float(row.get("近5天表現%", 0.0), 0.0) > 0:
+        tags.append("趨勢翻正")
+    if safe_int(row.get("同產業檔數", 1), 1) >= 3:
+        tags.append("族群共振")
+    elif safe_int(row.get("同產業檔數", 1), 1) == 2:
+        tags.append("同族群跟漲")
+    if row.get("保底補位", ""):
+        tags.append(str(row.get("保底補位")))
+    return "｜".join(tags[:4]) if tags else "先看分數與位置"
+
+
 def render_search_result_box(search_result):
     if not search_result:
         return
@@ -1878,6 +1931,7 @@ def render_search_result_box(search_result):
 
         <div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
         <div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>
+        <div class='soft-note'>入選理由：{html.escape(str(item.get('入選理由', '先看分數與位置')))}</div>
 
         <div class='card-stars-wrap'>
           <div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>
@@ -1890,6 +1944,7 @@ def render_search_result_box(search_result):
           <div class='stat-pill'><div class='stat-k'>接近最高點</div><div class='stat-v'>{safe_float(item.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
           <div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>
           <div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>
+          <div class='stat-pill'><div class='stat-k'>族群共振分數</div><div class='stat-v'>{safe_float(item.get('族群共振分數', 0.0), 0.0):.2f}</div></div>
           <div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>
           <div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>
         </div>
@@ -1919,6 +1974,7 @@ def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
 
   <div class="card-predict">{html.escape(str(row.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
   <div class="card-predict-note">{html.escape(str(row.get('預測副句', '先以原本分數與熱度為主')))}</div>
+  <div class="soft-note">入選理由：{html.escape(str(row.get('入選理由', '先看分數與位置')))}</div>
 
   <div class="card-stars-wrap">
     <div class="card-stars">{row.get('推薦指數', '')}</div>
@@ -1931,6 +1987,9 @@ def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
     <div class="stat-pill"><div class="stat-k">接近最高點</div><div class="stat-v">{safe_float(row.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
     <div class="stat-pill"><div class="stat-k">所屬產業</div><div class="stat-v">{row.get('產業', '其他')}</div></div>
     <div class="stat-pill"><div class="stat-k">族群熱度</div><div class="stat-v">{row.get('族群狀態', '單兵觀察')}</div></div>
+    <div class="stat-pill"><div class="stat-k">族群共振分數</div><div class="stat-v">{safe_float(row.get('族群共振分數', 0.0), 0.0):.2f}</div></div>
+    <div class="stat-pill"><div class="stat-k">近 5 天</div><div class="stat-v">{safe_float(row.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>
+    <div class="stat-pill"><div class="stat-k">近 20 天</div><div class="stat-v">{safe_float(row.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>
   </div>
 </div>
 """,
@@ -2495,6 +2554,8 @@ if "raw_data_vault_v12" in st.session_state:
         industry_counts = industry_col.value_counts()
         res["同產業檔數"] = industry_col.map(industry_counts).fillna(1).astype(int)
         res["族群狀態"] = res["同產業檔數"].apply(lambda n: f"同族群 {int(n)} 檔" if int(n) >= 2 else "一支獨秀")
+        res["族群共振分數"] = res["同產業檔數"].apply(lambda n: round(min(2.0, max(0, int(n)-1) * 0.6), 2))
+        res["入選理由"] = res.apply(build_reason_tags, axis=1)
 
     a_df = res[res["模式分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
     b_df = res[res["模式分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
