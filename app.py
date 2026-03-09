@@ -685,38 +685,38 @@ def get_thresholds(now_ts, is_test=False):
 
     if is_test:
         if m <= 60:
-            pullback_lim = 0.032
-            dist_limit = 6.5
+            pullback_lim = 0.025
+            dist_limit = 5.5
         elif m <= 180:
-            pullback_lim = 0.024
-            dist_limit = 5.3
-        else:
             pullback_lim = 0.018
-            dist_limit = 4.2
+            dist_limit = 4.6
+        else:
+            pullback_lim = 0.012
+            dist_limit = 3.6
         return {
             "dist_limit": dist_limit,
-            "vol_limit": 120_000,
+            "vol_limit": 200_000,
             "pullback_lim": pullback_lim,
-            "close_pos_min": 0.52,
-            "vol_ratio_min": 0.72,
+            "close_pos_min": 0.60,
+            "vol_ratio_min": 0.85,
         }
 
     if m <= 60:
-        dist_limit = 4.8
-        pullback_lim = 0.022
+        dist_limit = 4.0
+        pullback_lim = 0.018
     elif m <= 180:
-        dist_limit = 3.8
-        pullback_lim = 0.015
+        dist_limit = 3.0
+        pullback_lim = 0.012
     else:
-        dist_limit = 2.8
-        pullback_lim = 0.010
+        dist_limit = 2.2
+        pullback_lim = 0.008
 
     return {
         "dist_limit": dist_limit,
-        "vol_limit": 350_000,
+        "vol_limit": 500_000,
         "pullback_lim": pullback_lim,
-        "close_pos_min": 0.68,
-        "vol_ratio_min": 0.98,
+        "close_pos_min": 0.72,
+        "vol_ratio_min": 1.10,
     }
 
 
@@ -898,10 +898,10 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     proximity_52w = (r["last"] / max(high_52w, 1e-9) * 100.0) if high_52w > 0 else 0.0
 
     score = 0.0
-    score += min(3.0, max(0.0, 3.2 - r["dist"] * 0.95))
-    score += min(3.0, max(0.0, vol_ratio_live - 0.85))
-    score += 1.0 if close_pos >= 0.90 else 0.6 if close_pos >= 0.78 else 0.2 if close_pos >= 0.62 else 0.0
-    score += min(1.4, board_streak * 0.7)
+    score += min(3.0, max(0.0, 3.0 - r["dist"] * 1.1))
+    score += min(3.0, max(0.0, vol_ratio_live - 1.0))
+    score += 1.0 if close_pos >= 0.92 else 0.5 if close_pos >= 0.82 else 0.0
+    score += min(1.6, board_streak * 0.8)
     score += 0.8 if proximity_52w >= 92 else 0.3 if proximity_52w >= 85 else 0.0
     score += 0.4 if ret5 > 0 else 0.0
     score += 0.4 if ret20 > 0 else 0.0
@@ -909,38 +909,16 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     bloodline_note = ""
     if use_bloodline:
         if board_streak >= max(2, min_board + 1):
-            score += 0.7
+            score += 0.8
             bloodline_note = "｜血統強"
         elif board_streak >= min_board:
-            score += 0.35
+            score += 0.4
             bloodline_note = "｜血統穩"
         else:
-            score -= 0.25 if not is_test else 0.08
+            score -= 0.55 if not is_test else 0.15
             bloodline_note = "｜新起漲"
 
-    weak_reason = None
-    soft_penalty = 0.0
-    relaxed_vol_ratio_floor = max(0.60, th["vol_ratio_min"] * 0.72)
-    hard_pullback_lim = th["pullback_lim"] * 1.8
-    hard_close_pos_floor = max(0.38, th["close_pos_min"] - 0.22)
-
-    if vol_ratio_live < relaxed_vol_ratio_floor:
-        weak_reason = ("買賣不夠熱絡", "即時的交易熱度真的偏弱")
-    elif vol_ratio_live < th["vol_ratio_min"]:
-        soft_penalty += 0.55
-
-    if pullback > hard_pullback_lim:
-        weak_reason = ("從高點掉下來太多", "目前價格已經從今天最高點掉落太多")
-    elif pullback > th["pullback_lim"]:
-        soft_penalty += min(0.9, (pullback - th["pullback_lim"]) * 35.0)
-
-    if close_pos < hard_close_pos_floor and rng > max(0.1, r["last"] * 0.002):
-        weak_reason = ("目前價格相對弱勢", "今天價格位置看起來真的偏弱")
-    elif close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
-        soft_penalty += 0.45
-
-    score -= soft_penalty
-    signal_score = max(0.0, min(10.0, round(score, 2)))
+    signal_score = min(10.0, round(score, 2))
 
     status = "🔒 漲到頂買不到" if hard_locked else "🟣 快漲到最高價" if near_limit else "⚡ 強力上漲中"
     status = f"{status}{bloodline_note}"
@@ -983,8 +961,12 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
 
     if r["dist"] > th["dist_limit"] or r["vol_sh"] < th["vol_limit"]:
         return {"passed": False, "reason_key": "未達基本熱門門檻", "reason_text": "未達到基本篩選條件", "item": item}
-    if weak_reason:
-        return {"passed": False, "reason_key": weak_reason[0], "reason_text": weak_reason[1], "item": item}
+    if vol_ratio_live < th["vol_ratio_min"]:
+        return {"passed": False, "reason_key": "買賣不夠熱絡", "reason_text": "即時的交易熱度不夠", "item": item}
+    if pullback > th["pullback_lim"]:
+        return {"passed": False, "reason_key": "從高點掉下來太多", "reason_text": "目前價格已經從今天最高點掉落太多", "item": item}
+    if close_pos < th["close_pos_min"] and rng > max(0.1, r["last"] * 0.002):
+        return {"passed": False, "reason_key": "目前價格相對弱勢", "reason_text": "今天價格位置看起來不夠強", "item": item}
     return {"passed": True, "reason_key": "通過", "reason_text": "符合當前所有條件", "item": item}
 
 
@@ -1295,19 +1277,9 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
     }
 
 
-
 def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
     diag = copy_diag(base_diag)
-    stats = {
-        "候選總數": 0,
-        "買賣不夠熱絡": [],
-        "從高點掉下來太多": [],
-        "目前價格相對弱勢": [],
-        "過去沒有連續大漲紀錄": [],
-        "資訊不足": [],
-        "未達基本熱門門檻": [],
-        "市場不符": [],
-    }
+    stats = {"候選總數": 0, "買賣不夠熱絡": [], "從高點掉下來太多": [], "目前價格相對弱勢": [], "過去沒有連續大漲紀錄": [], "資訊不足": [], "未達基本熱門門檻": [], "市場不符": []}
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(), stats, diag
 
@@ -1316,153 +1288,57 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
     if only_tse:
         work = work[work["market"] == "上市"].copy()
 
-    # 這一層只做最基本資料清洗，不再過早砍光候選名單
-    work = work[(work["last"] > 0) & (work["vol_sh"] > 0)].copy()
+    work = work[(work["dist"] <= th["dist_limit"]) & (work["vol_sh"] >= th["vol_limit"])].copy()
     stats["候選總數"] = len(work)
     if work.empty:
         diag["final_count"] = 0
         return pd.DataFrame(), stats, diag
 
     out = []
-
-    def _fallback_item(r, feat=None, reason_text=""):
-        feat = feat or {}
-        high = safe_float(r.get("high", 0.0), 0.0)
-        low = safe_float(r.get("low", 0.0), 0.0)
-        last = safe_float(r.get("last", 0.0), 0.0)
-        rng = max(high - low, 1e-9)
-        close_pos = 1.0 if rng <= 1e-9 else (last - low) / rng
-        proximity_52w = 0.0
-        high_52w = safe_float(feat.get("high_52w", 0.0), 0.0)
-        if high_52w > 0:
-            proximity_52w = last / max(high_52w, 1e-9) * 100.0
-        ret5 = safe_float(feat.get("ret5", 0.0), 0.0)
-        ret20 = safe_float(feat.get("ret20", 0.0), 0.0)
-        vol_ma20 = safe_float(feat.get("vol_ma20", 0.0), 0.0)
-        frac = intraday_progress_fraction(now_ts)
-        vol_ratio_live = safe_float(r.get("vol_sh", 0), 0) / max(vol_ma20 * max(frac, 0.15), 1e-9) if vol_ma20 > 0 else 0.0
-        board_streak = safe_int(feat.get("board_streak", 0), 0)
-
-        score = 3.0
-        score += min(2.4, max(0.0, 2.4 - safe_float(r.get("dist", 99.0), 99.0) * 0.42))
-        score += min(2.0, max(0.0, vol_ratio_live - 0.6))
-        score += 0.9 if close_pos >= 0.85 else 0.4 if close_pos >= 0.70 else 0.0
-        score += 0.6 if proximity_52w >= 92 else 0.2 if proximity_52w >= 84 else 0.0
-        score += 0.3 if ret5 > 0 else 0.0
-        score += 0.3 if ret20 > 0 else 0.0
-        if use_bloodline:
-            score += min(0.8, board_streak * 0.35)
-        signal_score = min(10.0, round(score, 2))
-        star_count = score_to_star_count(
-            signal_score=signal_score,
-            dist_pct=safe_float(r.get("dist", 99.0), 99.0),
-            vol_ratio=vol_ratio_live,
-            board_streak=board_streak,
-            close_pos=close_pos,
-            proximity_52w=proximity_52w,
-            status_text=str(reason_text or "候補觀察"),
-        )
-        return {
-            "代號": r["code"],
-            "名稱": r["name"],
-            "市場": r.get("market", "上市"),
-            "現價": last,
-            "漲幅%": safe_float(r.get("change_pct", 0.0), 0.0),
-            "今日最高": high,
-            "距離最高價%": safe_float(r.get("dist", 99.0), 99.0),
-            "交易熱度": round(vol_ratio_live, 2),
-            "今日表現分數": signal_score,
-            "推薦星等": star_count,
-            "推薦指數": render_star_bar(star_count),
-            "狀態": "🟡 候補觀察中" if not reason_text else f"🟡 {reason_text}",
-            "階段": f"過去連續大漲 {board_streak} 天" if board_streak > 0 else "正在觀察中",
-            "board_val": board_streak,
-            "close_pos": close_pos,
-            "pullback": max(0.0, (high - last) / max(high, 1e-9)) if high > 0 else 0.0,
-            "接近一年最高價%": proximity_52w,
-            "近5天表現%": ret5,
-            "近20天表現%": ret20,
-            "best_bid": safe_float(r.get("best_bid", 0.0), 0.0),
-            "best_bid_size": safe_int(r.get("best_bid_size", 0), 0),
-            "best_ask": safe_float(r.get("best_ask", 0.0), 0.0),
-            "best_ask_size": safe_int(r.get("best_ask_size", 0), 0),
-            "成交量": safe_int(r.get("vol_sh", 0), 0),
-        }
-
     for _, r in work.iterrows():
-        feat = feature_cache.get(r["code"])
         assessment = evaluate_candidate_record(
             r=r,
-            feat=feat,
+            feat=feature_cache.get(r["code"]),
             now_ts=now_ts,
             is_test=is_test,
             use_bloodline=use_bloodline,
             only_tse=only_tse,
             min_board=min_board,
         )
-
-        reason_key = assessment.get("reason_key", "通過")
-        reason_text = assessment.get("reason_text", "符合條件")
-        item = assessment.get("item")
-
         if not assessment.get("passed"):
+            reason_key = assessment.get("reason_key", "資訊不足")
             if reason_key not in stats:
                 stats[reason_key] = []
             stats[reason_key].append(f"{r['code']} {r['name']}")
             if reason_key == "資訊不足":
                 diag["yf_fail"] += 1
-
-        if item is None:
-            item = _fallback_item(r.to_dict(), feat=feat, reason_text=reason_text)
-
-        item["退件原因"] = "" if assessment.get("passed") else reason_text
-        item["歷史資料狀態"] = "完整" if feat else "不足"
-        item["是否通過原始條件"] = bool(assessment.get("passed"))
-
-        # 沒過原始條件時，降級但不直接消失
-        if not assessment.get("passed"):
-            raw_score = safe_float(item.get("今日表現分數", 0.0), 0.0)
-            penalty = 0.8 if reason_key in ["買賣不夠熱絡", "從高點掉下來太多", "目前價格相對弱勢"] else 0.5
-            item["今日表現分數"] = max(2.8 if is_test else 3.2, round(raw_score - penalty, 2))
-            item["推薦星等"] = max(1, min(5, int(item.get("推薦星等", 1)) - 1))
-            item["推薦指數"] = render_star_bar(item["推薦星等"])
-
-        out.append(item)
+            continue
+        out.append(assessment["item"])
 
     res = pd.DataFrame(out)
-    if res.empty:
-        diag["final_count"] = 0
-        return res, stats, diag
+    if not res.empty:
+        res = res.sort_values(["推薦星等", "今日表現分數", "board_val", "交易熱度", "距離最高價%"], ascending=[False, False, False, False, True]).reset_index(drop=True)
 
-    res = res.sort_values(
-        ["是否通過原始條件", "推薦星等", "今日表現分數", "board_val", "交易熱度", "距離最高價%"],
-        ascending=[False, False, False, False, False, True]
-    ).reset_index(drop=True)
+        try:
+            score = res["今日表現分數"].astype(float)
+            a_th = max(7.2, float(score.quantile(0.90)))
+            b_th = max(5.8, float(score.quantile(0.60)))
+            c_th = max(4.3, float(score.quantile(0.30)))
 
-    score = pd.to_numeric(res["今日表現分數"], errors="coerce").fillna(0.0)
-    a_th = max(7.0, float(score.quantile(0.88))) if len(score) >= 4 else 7.0
-    b_th = max(5.6, float(score.quantile(0.58))) if len(score) >= 4 else 5.6
-    c_th = max(4.2, float(score.quantile(0.28))) if len(score) >= 4 else 4.2
+            def _tier(s):
+                if s >= a_th:
+                    return "A級焦點"
+                if s >= b_th:
+                    return "B級觀察"
+                if s >= c_th:
+                    return "C級候補"
+                return "保底觀察"
 
-    def _tier(row):
-        s = safe_float(row.get("今日表現分數", 0.0), 0.0)
-        passed = bool(row.get("是否通過原始條件", False))
-        if passed and s >= a_th:
-            return "A級焦點"
-        if s >= b_th:
-            return "B級觀察"
-        if s >= c_th:
-            return "C級候補"
-        return "保底觀察"
-
-    res["分級"] = res.apply(_tier, axis=1)
-
-    # 保底：避免 A/B/C 三區全空
-    main_count = int((res["分級"].isin(["A級焦點", "B級觀察", "C級候補"])).sum())
-    if main_count == 0 and not res.empty:
-        promote_n = min(8, len(res))
-        res.loc[res.index[:promote_n], "分級"] = "C級候補"
-
+            res["分級"] = score.apply(_tier)
+        except Exception:
+            res["分級"] = "C級候補"
+    else:
+        res["分級"] = pd.Series(dtype=str)
     diag["final_count"] = len(res)
     return res, stats, diag
 
@@ -1754,6 +1630,42 @@ def render_search_result_box(search_result):
     """
     st.markdown(html_block, unsafe_allow_html=True)
 
+
+
+def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
+    if section_df is None or section_df.empty:
+        st.info(empty_text)
+        return
+
+    cols = st.columns(4)
+    for i, (_, row) in enumerate(section_df.iterrows()):
+        with cols[i % 4]:
+            st.markdown(
+                f"""
+<div class="card">
+  <div class="card-stage">{row.get('階段', '')}</div>
+  <div class="card-code">{row.get('代號', '')}</div>
+  <div class="card-name">{row.get('名稱', '')} ｜ {row.get('市場', '')}</div>
+  <div class="card-price">{safe_float(row.get('現價', 0.0), 0.0):.2f}</div>
+  <div class="card-status">{row.get('狀態', '')}</div>
+
+  <div class="card-predict">{html.escape(str(row.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
+  <div class="card-predict-note">{html.escape(str(row.get('預測副句', '先以原本分數與熱度為主')))}</div>
+
+  <div class="card-stars-wrap">
+    <div class="card-stars">{row.get('推薦指數', '')}</div>
+    <div class="card-stars-badge">推薦 {int(safe_int(row.get('推薦星等', 1), 1))}/5</div>
+  </div>
+  <div class="card-grid">
+    <div class="stat-pill"><div class="stat-k">今日分數</div><div class="stat-v">{safe_float(row.get('今日表現分數', 0.0), 0.0):.2f}</div></div>
+    <div class="stat-pill"><div class="stat-k">交易熱度</div><div class="stat-v">{safe_float(row.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
+    <div class="stat-pill"><div class="stat-k">距最高價</div><div class="stat-v">{safe_float(row.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
+    <div class="stat-pill"><div class="stat-k">接近最高點</div><div class="stat-v">{safe_float(row.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
 # ============================================================
 # UI 介面
@@ -2302,16 +2214,29 @@ if "raw_data_vault_v12" in st.session_state:
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
-    a_df = res[res["分級"] == "A級焦點"].copy() if not res.empty and "分級" in res.columns else pd.DataFrame()
-    b_df = res[res["分級"] == "B級觀察"].copy() if not res.empty and "分級" in res.columns else pd.DataFrame()
-    c_df = res[res["分級"] == "C級候補"].copy() if not res.empty and "分級" in res.columns else pd.DataFrame()
-    keep_df = res[res["分級"] == "保底觀察"].copy() if not res.empty and "分級" in res.columns else pd.DataFrame()
+    if not res.empty and "分級" not in res.columns:
+        res["分級"] = "C級候補"
 
-    render_stock_section("A級焦點股", a_df, "今天暫時沒有達到 A 級焦點條件的股票。")
-    render_stock_section("B級觀察股", b_df, "今天暫時沒有 B 級觀察名單。")
-    render_stock_section("C級候補股", c_df, "今天暫時沒有 C 級候補名單。")
-    if keep_df is not None and not keep_df.empty:
-        render_stock_section("保底觀察", keep_df, "今天沒有保底觀察名單。")
+    a_df = res[res["分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
+    b_df = res[res["分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
+    c_df = res[res["分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
+    keep_df = res[res["分級"] == "保底觀察"].copy() if not res.empty else pd.DataFrame()
+
+    st.subheader("A級焦點股")
+    render_stock_cards(a_df, "今天暫時沒有衝到 A 級的股票。")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("B級觀察股")
+    render_stock_cards(b_df, "今天暫時沒有落在 B 級的股票。")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("C級候補股")
+    render_stock_cards(c_df, "今天暫時沒有落在 C 級的股票。")
+
+    if not keep_df.empty:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.subheader("保底觀察")
+        render_stock_cards(keep_df, "今天沒有保底觀察名單。")
 
     with st.expander("🧪 歷史模擬測試 (過去126天)", expanded=False):
         st.caption("這個功能是拿過去 126 天的資料來算算看，如果照這套嚴格標準來找股票勝率如何。這只是模擬，不保證未來一定賺錢喔。")
