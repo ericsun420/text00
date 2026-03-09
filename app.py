@@ -1277,18 +1277,17 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
     }
 
 
+
 def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
     diag = copy_diag(base_diag)
     stats = {"候選總數": 0, "買賣不夠熱絡": [], "從高點掉下來太多": [], "目前價格相對弱勢": [], "過去沒有連續大漲紀錄": [], "資訊不足": [], "未達基本熱門門檻": [], "市場不符": []}
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(), stats, diag
 
-    th = get_thresholds(now_ts, is_test=is_test)
     work = raw_df.copy()
     if only_tse:
         work = work[work["market"] == "上市"].copy()
 
-    work = work[(work["dist"] <= th["dist_limit"]) & (work["vol_sh"] >= th["vol_limit"])].copy()
     stats["候選總數"] = len(work)
     if work.empty:
         diag["final_count"] = 0
@@ -1317,30 +1316,47 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     res = pd.DataFrame(out)
     if not res.empty:
-        res = res.sort_values(["推薦星等", "今日表現分數", "board_val", "交易熱度", "距離最高價%"], ascending=[False, False, False, False, True]).reset_index(drop=True)
+        res = res.sort_values(
+            ["今日表現分數", "推薦星等", "交易熱度", "board_val", "距離最高價%"],
+            ascending=[False, False, False, False, True],
+        ).reset_index(drop=True)
 
-        try:
-            score = res["今日表現分數"].astype(float)
-            a_th = max(7.2, float(score.quantile(0.90)))
-            b_th = max(5.8, float(score.quantile(0.60)))
-            c_th = max(4.3, float(score.quantile(0.30)))
+        score = res["今日表現分數"].astype(float)
+        risk = res["風險數"].astype(int)
 
-            def _tier(s):
-                if s >= a_th:
-                    return "A級焦點"
-                if s >= b_th:
-                    return "B級觀察"
-                if s >= c_th:
-                    return "C級候補"
-                return "保底觀察"
+        def _tier(row):
+            s = float(row["今日表現分數"])
+            rsk = int(row["風險數"])
+            if s >= 7.0 and rsk <= 1:
+                return "A級焦點"
+            if s >= 5.6 and rsk <= 2:
+                return "B級觀察"
+            if s >= 3.8:
+                return "C級候補"
+            return "保底觀察"
 
-            res["分級"] = score.apply(_tier)
-        except Exception:
-            res["分級"] = "C級候補"
+        res["分級"] = res.apply(_tier, axis=1)
+
+        # 保底：避免整片空白，但不扭曲太多
+        if not (res["分級"] == "A級焦點").any():
+            top_idx = res["今日表現分數"].idxmax()
+            res.loc[top_idx, "分級"] = "A級焦點"
+
+        if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 2:
+            reserve_idx = res[res["分級"].isin(["C級候補", "保底觀察"])].head(2).index
+            res.loc[reserve_idx, "分級"] = "B級觀察"
+
+        if (res["分級"] == "C級候補").sum() == 0 and len(res) >= 3:
+            reserve_idx = res[~res["分級"].isin(["A級焦點", "B級觀察"])].head(3).index
+            res.loc[reserve_idx, "分級"] = "C級候補"
+
     else:
         res["分級"] = pd.Series(dtype=str)
+
     diag["final_count"] = len(res)
     return res, stats, diag
+
+
 
 
 # ============================================================
