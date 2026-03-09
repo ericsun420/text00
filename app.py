@@ -1317,31 +1317,28 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     res = pd.DataFrame(out)
     if not res.empty:
-        res = res.sort_values
+        res = res.sort_values(["推薦星等", "今日表現分數", "board_val", "交易熱度", "距離最高價%"], ascending=[False, False, False, False, True]).reset_index(drop=True)
 
-# === 動態分級修正 (A/B/C + 保底) ===
-if not res.empty:
-    try:
-        score = res["今日表現分數"].astype(float)
-        a_th = max(7.2, score.quantile(0.90))
-        b_th = max(5.8, score.quantile(0.60))
-        c_th = max(4.3, score.quantile(0.30))
+        try:
+            score = res["今日表現分數"].astype(float)
+            a_th = max(7.2, float(score.quantile(0.90)))
+            b_th = max(5.8, float(score.quantile(0.60)))
+            c_th = max(4.3, float(score.quantile(0.30)))
 
-        def _tier(s):
-            if s >= a_th:
-                return "A級焦點"
-            elif s >= b_th:
-                return "B級觀察"
-            elif s >= c_th:
-                return "C級候補"
-            else:
+            def _tier(s):
+                if s >= a_th:
+                    return "A級焦點"
+                if s >= b_th:
+                    return "B級觀察"
+                if s >= c_th:
+                    return "C級候補"
                 return "保底觀察"
 
-        res["分級"] = score.apply(_tier)
-    except Exception:
-        res["分級"] = "C級候補"
-
-(["推薦星等", "今日表現分數", "board_val", "交易熱度", "距離最高價%"], ascending=[False, False, False, False, True]).reset_index(drop=True)
+            res["分級"] = score.apply(_tier)
+        except Exception:
+            res["分級"] = "C級候補"
+    else:
+        res["分級"] = pd.Series(dtype=str)
     diag["final_count"] = len(res)
     return res, stats, diag
 
@@ -1633,6 +1630,42 @@ def render_search_result_box(search_result):
     """
     st.markdown(html_block, unsafe_allow_html=True)
 
+
+
+def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
+    if section_df is None or section_df.empty:
+        st.info(empty_text)
+        return
+
+    cols = st.columns(4)
+    for i, (_, row) in enumerate(section_df.iterrows()):
+        with cols[i % 4]:
+            st.markdown(
+                f"""
+<div class="card">
+  <div class="card-stage">{row.get('階段', '')}</div>
+  <div class="card-code">{row.get('代號', '')}</div>
+  <div class="card-name">{row.get('名稱', '')} ｜ {row.get('市場', '')}</div>
+  <div class="card-price">{safe_float(row.get('現價', 0.0), 0.0):.2f}</div>
+  <div class="card-status">{row.get('狀態', '')}</div>
+
+  <div class="card-predict">{html.escape(str(row.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
+  <div class="card-predict-note">{html.escape(str(row.get('預測副句', '先以原本分數與熱度為主')))}</div>
+
+  <div class="card-stars-wrap">
+    <div class="card-stars">{row.get('推薦指數', '')}</div>
+    <div class="card-stars-badge">推薦 {int(safe_int(row.get('推薦星等', 1), 1))}/5</div>
+  </div>
+  <div class="card-grid">
+    <div class="stat-pill"><div class="stat-k">今日分數</div><div class="stat-v">{safe_float(row.get('今日表現分數', 0.0), 0.0):.2f}</div></div>
+    <div class="stat-pill"><div class="stat-k">交易熱度</div><div class="stat-v">{safe_float(row.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
+    <div class="stat-pill"><div class="stat-k">距最高價</div><div class="stat-v">{safe_float(row.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
+    <div class="stat-pill"><div class="stat-k">接近最高點</div><div class="stat-v">{safe_float(row.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
+  </div>
+</div>
+""",
+                unsafe_allow_html=True,
+            )
 
 # ============================================================
 # UI 介面
@@ -2180,39 +2213,30 @@ if "raw_data_vault_v12" in st.session_state:
                 st.markdown('<div class="fail-bag">' + ''.join([f'<span class="fail-tag">{x}</span>' for x in items]) + '</div>', unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
-    st.subheader("強勢焦點股")
-    if not res.empty:
-        cols = st.columns(4)
-        for i, row in res.iterrows():
-            with cols[i % 4]:
-                st.markdown(
-                    f"""
-<div class="card">
-  <div class="card-stage">{row['階段']}</div>
-  <div class="card-code">{row['代號']}</div>
-  <div class="card-name">{row['名稱']} ｜ {row['市場']}</div>
-  <div class="card-price">{row['現價']:.2f}</div>
-  <div class="card-status">{row['狀態']}</div>
 
-  <div class="card-predict">{html.escape(str(row.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>
-  <div class="card-predict-note">{html.escape(str(row.get('預測副句', '先以原本分數與熱度為主')))}</div>
+    if not res.empty and "分級" not in res.columns:
+        res["分級"] = "C級候補"
 
-  <div class="card-stars-wrap">
-    <div class="card-stars">{row['推薦指數']}</div>
-    <div class="card-stars-badge">推薦 {int(row['推薦星等'])}/5</div>
-  </div>
-  <div class="card-grid">
-    <div class="stat-pill"><div class="stat-k">今日分數</div><div class="stat-v">{row['今日表現分數']:.2f}</div></div>
-    <div class="stat-pill"><div class="stat-k">交易熱度</div><div class="stat-v">{row['交易熱度']:.2f}x</div></div>
-    <div class="stat-pill"><div class="stat-k">距最高價</div><div class="stat-v">{row['距離最高價%']:.2f}%</div></div>
-    <div class="stat-pill"><div class="stat-k">接近最高點</div><div class="stat-v">{row['接近一年最高價%']:.1f}%</div></div>
-  </div>
-</div>
-""",
-                    unsafe_allow_html=True,
-                )
-    else:
-        st.warning("⚠️ 目前條件設定比較嚴格，沒有股票入選。你可以先打開上方的『放寬標準模式』，看看原本可能符合的機會。")
+    a_df = res[res["分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
+    b_df = res[res["分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
+    c_df = res[res["分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
+    keep_df = res[res["分級"] == "保底觀察"].copy() if not res.empty else pd.DataFrame()
+
+    st.subheader("A級焦點股")
+    render_stock_cards(a_df, "今天暫時沒有衝到 A 級的股票。")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("B級觀察股")
+    render_stock_cards(b_df, "今天暫時沒有落在 B 級的股票。")
+
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.subheader("C級候補股")
+    render_stock_cards(c_df, "今天暫時沒有落在 C 級的股票。")
+
+    if not keep_df.empty:
+        st.markdown("<hr>", unsafe_allow_html=True)
+        st.subheader("保底觀察")
+        render_stock_cards(keep_df, "今天沒有保底觀察名單。")
 
     with st.expander("🧪 歷史模擬測試 (過去126天)", expanded=False):
         st.caption("這個功能是拿過去 126 天的資料來算算看，如果照這套嚴格標準來找股票勝率如何。這只是模擬，不保證未來一定賺錢喔。")
