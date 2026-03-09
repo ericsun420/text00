@@ -145,6 +145,7 @@ def get_stock_list():
                         "name": str(row.get(n_col, "")).strip(),
                         "ex": ex,
                         "market": "上市" if ex == "tse" else "上櫃",
+                        "industry": normalize_industry(stype),
                     }
         except Exception as e:
             errors.append(f"{ex}: {e}")
@@ -270,6 +271,41 @@ def copy_diag(diag):
     if not isinstance(d.get("last_errors"), deque):
         d["last_errors"] = deque(d.get("last_errors", []), maxlen=12)
     return d
+
+def normalize_industry(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return "其他"
+    s = s.replace("業", "") if s.endswith("業") and len(s) <= 6 else s
+    alias = {
+        "半導體": "半導體",
+        "電子零組件": "電子零組件",
+        "電腦及週邊設備": "電腦週邊",
+        "電腦及週邊": "電腦週邊",
+        "光電": "光電",
+        "通信網路": "通信網路",
+        "電子通路": "電子通路",
+        "其他電子": "其他電子",
+        "資訊服務": "資訊服務",
+        "生技醫療": "生技醫療",
+        "電機機械": "電機機械",
+        "航運": "航運",
+        "鋼鐵": "鋼鐵",
+        "塑膠": "塑膠",
+        "建材營造": "營建",
+        "食品": "食品",
+        "金融保險": "金融保險",
+        "貿易百貨": "貿易百貨",
+        "油電燃氣": "油電燃氣",
+        "紡織纖維": "紡織纖維",
+        "居家生活": "居家生活",
+        "觀光餐旅": "觀光餐旅",
+        "綠能環保": "綠能環保",
+        "數位雲端": "數位雲端",
+        "運動休閒": "運動休閒",
+    }
+    return alias.get(s, s)
+
 
 
 # ============================================================
@@ -418,6 +454,7 @@ def build_quotes_from_snapshot(snapshot_json, market, meta_dict):
                 "code": code,
                 "name": meta_dict[code]["name"],
                 "market": market,
+                "industry": meta_dict[code].get("industry", "其他"),
                 "open": open_,
                 "high": high,
                 "low": low,
@@ -519,6 +556,7 @@ def fetch_candidate_rows_by_public_rank(meta_dict, api_key, diag, status_placeho
                     "code": code,
                     "name": meta_dict[code]["name"],
                     "market": market_of(code, meta_dict),
+                    "industry": meta_dict[code].get("industry", "其他"),
                     "open": open_,
                     "high": high,
                     "low": low,
@@ -856,6 +894,7 @@ def fetch_single_quote_row(session, api_key, code, meta_dict):
         "code": code,
         "name": meta_dict[code]["name"],
         "market": market_of(code, meta_dict),
+        "industry": meta_dict[code].get("industry", "其他"),
         "open": open_,
         "high": high,
         "low": low,
@@ -1047,6 +1086,7 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "代號": code,
         "名稱": name,
         "市場": market,
+        "產業": str(r.get("industry", "其他") or "其他"),
         "現價": r["last"],
         "漲幅%": safe_float(r.get("change_pct", 0.0), 0.0),
         "今日最高": safe_float(r.get("high", 0.0), 0.0),
@@ -1832,7 +1872,7 @@ def render_search_result_box(search_result):
       <div class='card search-card'>
         <div class='card-stage'>{html.escape(item.get('階段', ''))}</div>
         <div class='card-code'>{html.escape(str(item.get('代號', '')))}</div>
-        <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))}</div>
+        <div class='card-name'>{html.escape(str(item.get('名稱', '')))} ｜ {html.escape(str(item.get('市場', '')))} ｜ {html.escape(str(item.get('產業', '其他')))}</div>
         <div class='card-price'>{safe_float(item.get('現價', 0.0), 0.0):.2f}</div>
         <div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>
 
@@ -1848,6 +1888,8 @@ def render_search_result_box(search_result):
           <div class='stat-pill'><div class='stat-k'>交易熱度</div><div class='stat-v'>{safe_float(item.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
           <div class='stat-pill'><div class='stat-k'>距最高價</div><div class='stat-v'>{safe_float(item.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
           <div class='stat-pill'><div class='stat-k'>接近最高點</div><div class='stat-v'>{safe_float(item.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
+          <div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>
+          <div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>
           <div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>
           <div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>
         </div>
@@ -1871,7 +1913,7 @@ def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
 <div class="card">
   <div class="card-stage">{row.get('階段', '')}</div>
   <div class="card-code">{row.get('代號', '')}</div>
-  <div class="card-name">{row.get('名稱', '')} ｜ {row.get('市場', '')}</div>
+  <div class="card-name">{row.get('名稱', '')} ｜ {row.get('市場', '')} ｜ {row.get('產業', '其他')}</div>
   <div class="card-price">{safe_float(row.get('現價', 0.0), 0.0):.2f}</div>
   <div class="card-status">{row.get('狀態', '')}</div>
 
@@ -1887,6 +1929,8 @@ def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
     <div class="stat-pill"><div class="stat-k">交易熱度</div><div class="stat-v">{safe_float(row.get('交易熱度', 0.0), 0.0):.2f}x</div></div>
     <div class="stat-pill"><div class="stat-k">距最高價</div><div class="stat-v">{safe_float(row.get('距離最高價%', 0.0), 0.0):.2f}%</div></div>
     <div class="stat-pill"><div class="stat-k">接近最高點</div><div class="stat-v">{safe_float(row.get('接近一年最高價%', 0.0), 0.0):.1f}%</div></div>
+    <div class="stat-pill"><div class="stat-k">所屬產業</div><div class="stat-v">{row.get('產業', '其他')}</div></div>
+    <div class="stat-pill"><div class="stat-k">族群熱度</div><div class="stat-v">{row.get('族群狀態', '單兵觀察')}</div></div>
   </div>
 </div>
 """,
@@ -2446,6 +2490,12 @@ if "raw_data_vault_v12" in st.session_state:
         else:
             res["模式分級"] = "C級候補"
 
+    if not res.empty:
+        industry_col = res["產業"].fillna("其他").replace("", "其他") if "產業" in res.columns else pd.Series(["其他"] * len(res))
+        industry_counts = industry_col.value_counts()
+        res["同產業檔數"] = industry_col.map(industry_counts).fillna(1).astype(int)
+        res["族群狀態"] = res["同產業檔數"].apply(lambda n: f"同族群 {int(n)} 檔" if int(n) >= 2 else "一支獨秀")
+
     a_df = res[res["模式分級"] == "A級焦點"].copy() if not res.empty else pd.DataFrame()
     b_df = res[res["模式分級"] == "B級觀察"].copy() if not res.empty else pd.DataFrame()
     c_df = res[res["模式分級"] == "C級候補"].copy() if not res.empty else pd.DataFrame()
@@ -2457,6 +2507,15 @@ if "raw_data_vault_v12" in st.session_state:
         fallback_badges.append("B 含保底補位")
     extra_note = f"｜{' / '.join(fallback_badges)}" if fallback_badges else ""
     st.caption(f"目前分布｜A級 {len(a_df)} 檔 ｜ B級 {len(b_df)} 檔 ｜ C級 {len(c_df)} 檔{extra_note}")
+    if not res.empty and "產業" in res.columns:
+        industry_top = (
+            res[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"])]
+            .assign(_industry=res["產業"].fillna("其他").replace("", "其他"))
+            .groupby("_industry").size().sort_values(ascending=False)
+        )
+        strong_groups = [f"{ind} {cnt}檔" for ind, cnt in industry_top.items() if cnt >= 2][:4]
+        if strong_groups:
+            st.caption("同產業同步發動｜" + " / ".join(strong_groups))
 
     st.subheader("A級焦點")
     render_stock_cards(a_df, "今天暫時沒有衝到 A 級焦點的股票。")
