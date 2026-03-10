@@ -23,19 +23,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 基本設定
 # ============================================================
 APP_TITLE = "起漲戰情室 OMEGA"
-APP_SUBTITLE = "v12.2 開關強化版｜官方資料優先｜熱門榜單搜尋｜歷史模擬測試"
+APP_SUBTITLE = "v13.2 精修對齊版｜首根雷達｜族群共振｜歷史模擬"
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
 RAW_HISTORY_DAYS = 420
 DEFAULT_COOLDOWN_SECONDS = 45
-DEFAULT_TOP_VOLUME = 180
-DEFAULT_TOP_MOVERS = 120
+DEFAULT_TOP_VOLUME = 220
+DEFAULT_TOP_MOVERS = 150
 DEFAULT_MIN_BOARD = 1
 DEFAULT_HOLD_DAYS = 5
-MAX_CANDIDATES = 260
-FINAL_ENRICH_LIMIT = 18
+MAX_CANDIDATES = 320
+FINAL_ENRICH_LIMIT = 24
 YF_DOWNLOAD_CHUNK = 45
+COLD_POOL_LIMIT = 90
 
 # ============================================================
 # 診斷
@@ -145,11 +146,13 @@ def get_stock_list():
                 code = str(row.get(c_col, "")).strip()
                 if len(code) == 4 and code.isdigit():
                     industry_raw = raw_group if raw_group and raw_group != "nan" else ""
+                    stock_name = str(row.get(n_col, "")).strip()
+                    industry_norm = normalize_industry(industry_raw)
                     meta[code] = {
-                        "name": str(row.get(n_col, "")).strip(),
+                        "name": stock_name,
                         "ex": ex,
                         "market": "上市" if ex == "tse" else "上櫃",
-                        "industry": normalize_industry(industry_raw),
+                        "industry": refine_industry(code, stock_name, industry_norm),
                     }
         except Exception as e:
             errors.append(f"{ex}: {e}")
@@ -334,6 +337,59 @@ def normalize_industry(raw: str) -> str:
     return alias.get(s, s)
 
 
+def refine_industry(code: str, name: str, industry: str) -> str:
+    code = str(code or "").strip()
+    name = str(name or "").strip()
+    industry = str(industry or "其他").strip() or "其他"
+
+    code_map = {
+        "2426": "LED光元件",
+        "2344": "記憶體",
+        "2408": "記憶體",
+        "2337": "記憶體",
+        "3037": "ABF載板",
+        "8046": "ABF載板",
+        "3189": "ABF載板",
+        "2409": "面板顯示",
+        "3481": "面板顯示",
+        "6116": "面板顯示",
+        "2383": "光學鏡頭",
+        "3406": "光學鏡頭",
+        "3008": "光學鏡頭",
+        "4976": "PCB設備",
+        "5347": "IC設計",
+        "2454": "IC設計",
+        "3227": "IC設計",
+        "3017": "伺服器ODM",
+        "3231": "AI伺服器",
+        "6669": "散熱模組",
+        "3015": "散熱模組",
+        "3324": "連接器",
+        "3034": "電源供應",
+        "2308": "電源供應",
+    }
+    if code in code_map:
+        return code_map[code]
+
+    keyword_map = [
+        (["鼎元", "億光", "艾笛森", "隆達", "富采", "宏齊", "佰鴻", "光磊"], "LED光元件"),
+        (["友達", "群創", "彩晶", "凌巨", "中光電"], "面板顯示"),
+        (["玉晶光", "亞光", "佳能", "先進光", "大立光", "揚明光"], "光學鏡頭"),
+        (["南亞科", "華邦電", "旺宏", "晶豪科", "創見"], "記憶體"),
+        (["欣興", "景碩", "南電"], "ABF載板"),
+        (["嘉澤", "貿聯", "信音", "湧德", "良維"], "高速連接"),
+        (["奇鋐", "雙鴻", "健策", "尼得科超眾", "力致"], "散熱模組"),
+        (["緯創", "廣達", "英業達", "緯穎", "仁寶"], "伺服器ODM"),
+        (["台積電", "聯電", "世界"], "晶圓代工"),
+        (["聯發科", "瑞昱", "世芯", "創意", "智原", "譜瑞", "祥碩"], "IC設計"),
+    ]
+    for keys, label in keyword_map:
+        if any(k in name for k in keys):
+            return label
+
+    return industry
+
+
 
 # ============================================================
 # API 資料讀取
@@ -499,6 +555,28 @@ def build_quotes_from_snapshot(snapshot_json, market, meta_dict):
     return pd.DataFrame(rows)
 
 
+def select_cold_momentum_codes(quotes_df, limit=COLD_POOL_LIMIT):
+    if quotes_df is None or getattr(quotes_df, "empty", False):
+        return []
+    q = quotes_df.copy()
+    if q.empty:
+        return []
+    q = q[(q["last"].astype(float) >= 8.0)]
+    q = q[(q["change_pct"].astype(float) >= 0.8) & (q["change_pct"].astype(float) <= 8.5)]
+    q = q[(q["dist"].astype(float) <= 6.8)]
+    q = q[(q["vol_sh"].astype(float) >= 60000) & (q["vol_sh"].astype(float) <= 2500000)]
+    q = q[(q["trade_value"].astype(float) >= 12000000)]
+    if q.empty:
+        return []
+    q["cold_score"] = (
+        q["change_pct"].astype(float) * 1.00
+        + (6.8 - q["dist"].astype(float)).clip(lower=0.0) * 0.55
+        + (q["trade_value"].astype(float).clip(lower=0.0, upper=200000000) / 200000000) * 1.20
+        + ((q["vol_sh"].astype(float).between(180000, 1500000)).astype(float) * 0.55)
+    )
+    return q.sort_values(["cold_score", "change_pct", "dist", "trade_value"], ascending=[False, False, True, False])["code"].head(limit).tolist()
+
+
 def fetch_market_snapshot_and_rank(meta_dict, api_key, diag, status_placeholder):
     t0 = time.perf_counter()
     session = make_retry_session()
@@ -522,7 +600,8 @@ def fetch_market_snapshot_and_rank(meta_dict, api_key, diag, status_placeholder)
 
     vol_top = quotes_df.sort_values(["vol_sh", "trade_value"], ascending=[False, False])["code"].head(DEFAULT_TOP_VOLUME).tolist()
     mover_top = quotes_df.sort_values(["change_pct", "trade_value"], ascending=[False, False])["code"].head(DEFAULT_TOP_MOVERS).tolist()
-    ranked_codes = stable_unique(vol_top + mover_top)[:MAX_CANDIDATES]
+    cold_top = select_cold_momentum_codes(quotes_df, limit=COLD_POOL_LIMIT)
+    ranked_codes = stable_unique(vol_top + mover_top + cold_top)[:MAX_CANDIDATES]
 
     candidate_df = quotes_df[quotes_df["code"].isin(ranked_codes)].copy()
     order_map = {c: i for i, c in enumerate(ranked_codes)}
@@ -610,6 +689,10 @@ def fetch_candidate_rows_by_public_rank(meta_dict, api_key, diag, status_placeho
         time.sleep(sleep_sec)
 
     df = pd.DataFrame(rows).drop_duplicates("code", keep="first") if rows else pd.DataFrame()
+    if not df.empty:
+        cold_codes = set(select_cold_momentum_codes(df, limit=min(60, COLD_POOL_LIMIT)))
+        df["cold_boost"] = df["code"].isin(cold_codes).astype(int)
+        df = df.sort_values(["cold_boost", "rank_order", "dist", "vol_sh"], ascending=[False, True, True, False]).reset_index(drop=True)
     diag["rank_count"] = len(ranked_codes)
     diag["candidate_count"] = len(df)
     diag["t_rank"] = time.perf_counter() - t0
@@ -1707,13 +1790,25 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
                     res.loc[top_idx, ["分級", "模式分級", "保底補位"]] = ["A級焦點", "A級焦點", "A保底"]
 
         if (res["分級"] == "B級觀察").sum() == 0 and len(res) >= 1:
+            reserve_pool = res[~res.index.isin(res[res["分級"] == "A級焦點"].index)].copy()
+            reserve_pool = reserve_pool[
+                (reserve_pool["起漲雷達分數"].astype(float) >= (4.25 if is_test else 4.55))
+                & (reserve_pool["突破區間分數"].astype(float) >= (0.95 if is_test else 1.05))
+                & (reserve_pool["量能抬升比"].astype(float) >= (1.08 if is_test else 1.12))
+                & (reserve_pool["模式排序分"].astype(float) >= (6.2 if is_test else 6.8))
+                & (
+                    (reserve_pool["同族群跟漲數"].astype(int) >= 1)
+                    | (reserve_pool["族群共振分數"].astype(float) >= 0.9)
+                    | (reserve_pool["起漲雷達分數"].astype(float) >= 5.1)
+                )
+            ]
             reserve_idx = (
-                res[~res.index.isin(res[res["分級"] == "A級焦點"].index)]
-                .sort_values(["突破區間分數", "族群共振分數", "起漲雷達分數", "量能抬升比", "今日表現分數"], ascending=[False, False, False, False, False])
+                reserve_pool.sort_values(["突破區間分數", "族群共振分數", "起漲雷達分數", "量能抬升比", "今日表現分數"], ascending=[False, False, False, False, False])
                 .head(1)
                 .index
             )
-            res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底"]
+            if len(reserve_idx) > 0:
+                res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底(嚴選)"]
 
         # C 不是垃圾桶：只留真正還有起漲味道的前 8 檔，但如果完全沒有，補少量 C 保底
         c_candidates = res[(res["分級"] == "C級候補") | (res["分級"] == "排除")].copy()
@@ -1760,23 +1855,25 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
     else:
         res = pd.DataFrame(columns=["分級", "模式分級"])
 
-    # 最終同步：避免同一檔同時出現在「未達門檻/風險統計」與 A/B/C 推薦區
-    if not res.empty and "模式分級" in res.columns:
-        final_df = res[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"])].copy()
-        final_codes = set(final_df["代號"].astype(str)) if (not final_df.empty and "代號" in final_df.columns) else set()
-        for k, v in list(stats.items()):
-            if isinstance(v, list):
-                cleaned = []
-                seen = set()
-                for item in v:
-                    item_s = str(item)
-                    code = item_s.split()[0] if item_s else ""
-                    if code in final_codes:
-                        continue
-                    if item_s not in seen:
-                        seen.add(item_s)
-                        cleaned.append(item_s)
-                stats[k] = cleaned
+    # 最終同步：避免同一檔股票同時出現在 A/B/C 推薦與「未達門檻/風險統計」
+    final_codes = set()
+    if not res.empty and "模式分級" in res.columns and "代號" in res.columns:
+        final_codes = set(
+            res.loc[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"]), "代號"].astype(str)
+        )
+
+    for k, v in list(stats.items()):
+        if isinstance(v, list):
+            cleaned = []
+            seen = set()
+            for item in v:
+                code = str(item).split()[0] if str(item).strip() else ""
+                if code and code in final_codes:
+                    continue
+                if item not in seen:
+                    seen.add(item)
+                    cleaned.append(item)
+            stats[k] = cleaned
 
     diag["final_count"] = len(res)
     return res, stats, diag
@@ -1841,7 +1938,7 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
             board_list[i] = streak
         df["board_streak"] = board_list
 
-        # 盡量貼近現在 B/C 邏輯：不只抓爆衝，也抓整理後剛抬頭
+        # 盡量貼近現在前台 B/C 邏輯：看模式排序感，而不是只看爆衝條件
         df["dist_pct"] = 0.0
         for i in range(1, len(df)):
             prev_close = safe_float(df["Close"].iloc[i-1], 0.0)
@@ -1850,18 +1947,42 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
                 upper = calc_limit_up(prev_close)
                 df.iloc[i, df.columns.get_loc("dist_pct")] = max(0.0, (upper - close_now) / max(upper, 1e-9) * 100.0)
         ret5 = (df["Close"] / df["Close"].shift(5) - 1.0) * 100.0
+        ret10 = (df["Close"] / df["Close"].shift(10) - 1.0) * 100.0
         ret20 = (df["Close"] / df["Close"].shift(20) - 1.0) * 100.0
         range20_pct = ((df["High"].rolling(20).max() - df["Low"].rolling(20).min()) / df["Close"].replace(0, pd.NA)) * 100.0
-        signal = (
-            (df["chg_pct"] >= 1.5)
-            & (df["vol_ratio"] >= 1.15)
-            & (df["close_pos"] >= 0.68)
-            & (df["dist_pct"] <= 5.0)
-            & (ret5 >= 0.8)
-            & (range20_pct <= 22)
+        vol_ma5 = df["Volume"].rolling(5).mean()
+        vol_lift = vol_ma5 / df["vol_ma20"].replace(0, pd.NA)
+
+        breakout_proxy = (
+            (df["vol_ratio"] >= 1.15).astype(float) * 1.2
+            + (df["close_pos"] >= 0.74).astype(float) * 0.9
+            + (df["dist_pct"] <= 4.8).astype(float) * 0.9
+            + (df["chg_pct"] >= 1.3).astype(float) * 0.7
+            + (((ret20 > -3) & (ret20 <= 12) & (ret5 >= 0.8) & (range20_pct <= 18)).astype(float) * 1.2)
+            + ((vol_lift >= 1.10).astype(float) * 0.6)
+        )
+        mode_proxy = (
+            df["chg_pct"].clip(lower=0.0, upper=9.0) * 0.28
+            + df["vol_ratio"].clip(lower=0.0, upper=3.5) * 1.05
+            + df["close_pos"].clip(lower=0.0, upper=1.0) * 1.7
+            + ((5.8 - df["dist_pct"].clip(lower=0.0, upper=5.8)) / 5.8) * 1.2
+            + (breakout_proxy * 0.7)
+            + ((vol_lift.fillna(1.0).clip(lower=0.8, upper=1.8) - 1.0) * 1.0)
+            + (((ret20 > 0) & (ret5 > 0)).astype(float) * 0.5)
         )
         if use_bloodline:
-            signal &= (df["board_streak"] >= min_board) | ((ret20 <= 12) & (ret20 >= -3))
+            mode_proxy += df["board_streak"].clip(upper=3) * 0.35
+            mode_proxy -= (df["board_streak"] == 0).astype(float) * 0.18
+        else:
+            mode_proxy += (df["board_streak"] == 0).astype(float) * 0.18
+
+        signal = (
+            (mode_proxy >= (5.9 if not is_test else 5.4))
+            & (breakout_proxy >= (2.2 if not is_test else 1.8))
+            & (df["close_pos"] >= (0.70 if not is_test else 0.66))
+            & (df["dist_pct"] <= (5.4 if not is_test else 6.4))
+            & (vol_lift.fillna(1.0) >= (1.04 if not is_test else 1.00))
+        )
 
         sig_idx = df.index[signal.fillna(False)].tolist()
         for idx in sig_idx:
