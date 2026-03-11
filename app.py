@@ -23,7 +23,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # 基本設定
 # ============================================================
 APP_TITLE = "起漲戰情室 OMEGA"
-APP_SUBTITLE = "v13.2 精修對齊版｜首根雷達｜族群共振｜歷史模擬"
+APP_SUBTITLE = "v13.3 族群強化版｜首根雷達｜族群共振｜歷史模擬"
 FUGLE_API_KEY = "ZWJjZDhjZWYtMjhhMi00YWI2LTliNWQtMmViYzVhMmIzODdjIGY1N2Y0MGZmLWQ1MjgtNDk1OC1iZTljLWMxOWUwODQ4Y2U2Zg=="
 API_TIMEOUT = (3.0, 10.0)
 PUBLIC_TIMEOUT = (3.0, 12.0)
@@ -343,62 +343,57 @@ def refine_industry(code: str, name: str, industry: str) -> str:
     industry = str(industry or "其他").strip() or "其他"
 
     code_map = {
-        # LED / 光元件
         "2426": "LED光元件", "2499": "LED光元件", "2301": "LED光元件", "6164": "LED光元件",
-        "3698": "LED光元件", "2340": "LED光元件", "3019": "LED光元件", "6278": "LED光元件",
-        # 記憶體
+        "3698": "LED光元件", "2340": "LED光元件", "6278": "LED光元件", "3061": "LED光元件",
         "2344": "記憶體", "2408": "記憶體", "2337": "記憶體", "3006": "記憶體", "4967": "記憶體",
-        # ABF / 載板 / PCB 上游
-        "3037": "ABF載板", "8046": "ABF載板", "3189": "ABF載板", "2383": "高速連接", "2368": "CCL銅箔基板",
-        "2383": "高速連接", "6274": "高速連接", "8046": "ABF載板", "6191": "PCB設備",
-        # 面板 / 光學
+        "8299": "記憶體", "3260": "記憶體",
+        "3037": "ABF載板", "8046": "ABF載板", "3189": "ABF載板",
+        "2368": "CCL銅箔基板", "2383": "高速連接", "6274": "高速連接", "6128": "高速連接",
+        "3665": "高速連接", "3324": "高速連接", "6191": "PCB設備", "1815": "玻纖布",
+        "1616": "電線電纜", "1609": "電線電纜", "1608": "電線電纜",
         "2409": "面板顯示", "3481": "面板顯示", "6116": "面板顯示", "4938": "面板顯示",
         "3008": "光學鏡頭", "3406": "光學鏡頭", "4976": "光學鏡頭", "3376": "光學鏡頭", "3019": "光學鏡頭",
-        # IC 設計 / 晶圓代工
         "2454": "IC設計", "2379": "IC設計", "3035": "IC設計", "3443": "IC設計", "3661": "IC設計",
-        "3661": "IC設計", "5269": "IC設計", "6531": "IC設計", "6415": "IC設計", "2303": "晶圓代工",
-        "5347": "晶圓代工", "6770": "晶圓代工", "2330": "晶圓代工",
-        # AI 伺服器 / ODM / 散熱 / 連接
-        "3017": "伺服器ODM", "2382": "伺服器ODM", "2324": "伺服器ODM", "2356": "伺服器ODM", "6669": "散熱模組",
-        "3015": "散熱模組", "3653": "散熱模組", "6128": "高速連接", "3665": "高速連接", "3324": "高速連接",
-        # 電源 / 電池 / 網通
+        "5269": "IC設計", "6531": "IC設計", "6415": "IC設計", "2303": "晶圓代工", "5347": "晶圓代工",
+        "6770": "晶圓代工", "2330": "晶圓代工", "3711": "封測", "2449": "封測", "6239": "封測",
+        "3231": "AI伺服器", "3017": "伺服器ODM", "2382": "伺服器ODM", "2324": "伺服器ODM", "2356": "伺服器ODM",
+        "6669": "散熱模組", "3015": "散熱模組", "3653": "散熱模組", "2421": "機殼機構",
         "2308": "電源供應", "3034": "電源供應", "6409": "電源管理", "4931": "網通設備", "5388": "網通設備", "3596": "網通設備",
-        # 被動元件 / 功率半導體
         "2327": "被動元件", "2492": "被動元件", "3026": "功率半導體", "8261": "功率半導體", "6414": "功率半導體",
+        "2049": "工業電腦", "2395": "工業電腦", "2464": "工業電腦",
     }
     if code in code_map:
         return code_map[code]
 
     keyword_map = [
-        (["鼎元", "億光", "艾笛森", "隆達", "富采", "宏齊", "佰鴻", "光磊", "晶電", "東貝"], "LED光元件"),
+        (["鼎元", "億光", "艾笛森", "隆達", "富采", "宏齊", "佰鴻", "光磊", "晶電", "東貝", "久元"], "LED光元件"),
         (["友達", "群創", "彩晶", "凌巨", "中光電", "誠美材"], "面板顯示"),
         (["玉晶光", "亞光", "佳能", "先進光", "大立光", "揚明光", "今國光", "華晶科"], "光學鏡頭"),
-        (["南亞科", "華邦電", "旺宏", "晶豪科", "創見", "威剛", "品安", "十銓"], "記憶體"),
+        (["南亞科", "華邦電", "旺宏", "晶豪科", "創見", "威剛", "品安", "十銓", "群聯"], "記憶體"),
         (["欣興", "景碩", "南電"], "ABF載板"),
         (["台光電", "聯茂", "台燿", "金像電", "瀚宇博", "華通", "健鼎"], "CCL銅箔基板"),
+        (["富喬", "台玻", "德宏", "建榮"], "玻纖布"),
         (["嘉澤", "貿聯", "信音", "湧德", "良維", "正崴", "宣德", "優群"], "高速連接"),
         (["奇鋐", "雙鴻", "健策", "超眾", "力致", "建準", "高力"], "散熱模組"),
         (["緯創", "廣達", "英業達", "緯穎", "仁寶", "和碩", "技嘉", "微星"], "伺服器ODM"),
-        (["川湖", "勤誠", "晟銘電", "營邦", "迎廣"], "AI伺服器"),
+        (["川湖", "勤誠", "晟銘電", "營邦", "迎廣", "緯穎", "緯創"], "AI伺服器"),
         (["台積電", "聯電", "世界", "力積電", "VIS"], "晶圓代工"),
         (["聯發科", "瑞昱", "世芯", "創意", "智原", "譜瑞", "祥碩", "義隆", "聯詠", "矽力"], "IC設計"),
+        (["日月光", "矽品", "京元電", "頎邦"], "封測"),
         (["台達電", "光寶科", "群電", "康舒", "全漢"], "電源供應"),
         (["台半", "漢磊", "朋程", "茂達", "富鼎", "尼克森"], "功率半導體"),
         (["智邦", "明泰", "正文", "中磊", "啟碁", "神準", "智易"], "網通設備"),
         (["國巨", "華新科", "禾伸堂", "立隆電", "凱美"], "被動元件"),
         (["AES", "順達", "新普", "加百裕", "興能高"], "電池模組"),
+        (["上銀", "亞德客", "直得", "羅昇", "所羅門"], "自動化機器人"),
+        (["研華", "樺漢", "新漢", "振樺電"], "工業電腦"),
+        (["大亞", "華新", "合機", "華榮"], "電線電纜"),
     ]
     for keys, label in keyword_map:
         if any(k in name for k in keys):
             return label
 
     return industry
-
-
-
-# ============================================================
-# API 資料讀取
-# ============================================================
 def get_api_key():
     key = ""
     try:
@@ -1565,10 +1560,10 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
                 lasts = base.get("last", pd.Series([0]*len(base), index=base.index)).astype(float)
                 cps = ((lasts-ls)/(hs-ls).clip(lower=1e-9)).clip(lower=0.0, upper=1.0)
                 rm = (
-                    (base.get("change_pct", pd.Series([0]*len(base), index=base.index)).astype(float) >= (1.8 if not is_test else 0.9)) &
-                    (base.get("dist", pd.Series([99]*len(base), index=base.index)).astype(float) <= (4.8 if not is_test else 6.0)) &
-                    (base.get("vol_sh", pd.Series([0]*len(base), index=base.index)).astype(float) >= (450000 if not is_test else 220000)) &
-                    (cps >= (0.76 if not is_test else 0.68))
+                    (base.get("change_pct", pd.Series([0]*len(base), index=base.index)).astype(float) >= (2.8 if not is_test else 1.5)) &
+                    (base.get("dist", pd.Series([99]*len(base), index=base.index)).astype(float) <= (3.8 if not is_test else 5.0)) &
+                    (base.get("vol_sh", pd.Series([0]*len(base), index=base.index)).astype(float) >= (800000 if not is_test else 320000)) &
+                    (cps >= (0.82 if not is_test else 0.74))
                 )
                 total_n = int((base["_industry"] == ind).sum()) if ind else 1
                 rise_n_all = int(((base["_industry"] == ind) & rm).sum()) if ind else 0
@@ -1621,11 +1616,11 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
     close_pos_s = ((last_s - low_s) / rng_s).clip(lower=0.0, upper=1.0)
     trade_value_s = work.get("trade_value", pd.Series([0] * len(work), index=work.index)).astype(float)
     rising_mask = (
-        (work.get("change_pct", pd.Series([0] * len(work), index=work.index)).astype(float) >= (2.2 if not is_test else 1.1)) &
-        (work.get("dist", pd.Series([99] * len(work), index=work.index)).astype(float) <= (4.2 if not is_test else 5.4)) &
-        (work.get("vol_sh", pd.Series([0] * len(work), index=work.index)).astype(float) >= (600000 if not is_test else 260000)) &
-        (trade_value_s >= (25000000 if not is_test else 12000000)) &
-        (close_pos_s >= (0.80 if not is_test else 0.72))
+        (work.get("change_pct", pd.Series([0] * len(work), index=work.index)).astype(float) >= (2.8 if not is_test else 1.5)) &
+        (work.get("dist", pd.Series([99] * len(work), index=work.index)).astype(float) <= (3.8 if not is_test else 5.0)) &
+        (work.get("vol_sh", pd.Series([0] * len(work), index=work.index)).astype(float) >= (800000 if not is_test else 320000)) &
+        (trade_value_s >= (40000000 if not is_test else 18000000)) &
+        (close_pos_s >= (0.82 if not is_test else 0.74))
     )
     industry_rising = industry_col[rising_mask].value_counts()
 
@@ -1707,7 +1702,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         res["模式排序分"] = (
             res["今日表現分數"].astype(float)
             + res["起漲雷達分數"].astype(float) * 0.72
-            + res["族群共振分數"].astype(float) * 0.42
+            + res["族群共振分數"].astype(float) * 0.58
             - res["風險數"].astype(float) * 0.40
         )
 
@@ -1771,7 +1766,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
                 and cp >= (0.68 if is_test else 0.74)
                 and vol_lift >= (1.05 if is_test else 1.10)
                 and breakout_s >= (0.80 if is_test else 0.95)
-                and (cluster_s >= (0.8 if is_test else 0.9) or rising_n >= 1 or radar_s >= 4.8)
+                and (cluster_s >= (0.9 if is_test else 1.0) or rising_n >= 1 or radar_s >= 5.0)
                 and blood_b_ok
             ):
                 return "B級觀察"
@@ -1901,7 +1896,7 @@ def pick_backtest_universe(raw_df, top_n=28):
     return df["code"].tolist()
 
 
-def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=126, hold_days=5, use_bloodline=True, min_board=1):
+def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=126, hold_days=5, use_bloodline=True, min_board=1, is_test=False):
     trades = []
     if raw_daily is None or getattr(raw_daily, "empty", False) or not universe_codes:
         return pd.DataFrame(), {
@@ -1988,7 +1983,7 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
             mode_proxy += (df["board_streak"] == 0).astype(float) * 0.18
 
         signal = (
-            (mode_proxy >= (5.9 if not is_test else 5.4))
+            (mode_proxy >= (6.0 if not is_test else 5.5))
             & (breakout_proxy >= (2.2 if not is_test else 1.8))
             & (df["close_pos"] >= (0.70 if not is_test else 0.66))
             & (df["dist_pct"] <= (5.4 if not is_test else 6.4))
@@ -2807,6 +2802,7 @@ if "raw_data_vault_v12" in st.session_state:
         hold_days=hold_days,
         use_bloodline=use_bloodline,
         min_board=min_board,
+        is_test=is_test,
     )
     final_diag["t_backtest"] = time.perf_counter() - bt_t0
 
