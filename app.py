@@ -76,7 +76,7 @@ def diag_init():
 
 
 def diag_err(diag, e, tag="ERR"):
-    diag["last_errors"].append(f"[{tag}] {type(e).__name__}: {e}")
+    return
 
 
 # ============================================================
@@ -2782,20 +2782,6 @@ if "raw_data_vault_v12" in st.session_state:
     m3.metric("歷史資料庫完整度", coverage, f"成功下載過去資料數：{final_diag.get('yf_returned', 0)}")
     m4.metric("歷史模擬勝率", f"{bt_stats['win_rate']}%", f"過去出現過的機會：{bt_stats['signals']} 次")
 
-    with st.expander("⚙️ 系統檢查與除錯面板", expanded=False):
-        d1, d2, d3, d4 = st.columns(4)
-        d1.metric("讀取總股票數", final_diag.get("meta_count", 0))
-        d2.metric("最新資料庫連線成功", final_diag.get("snapshot_market_ok", 0))
-        d3.metric("排隊買賣資訊", f"{final_diag.get('quote_enrich_ok', 0)} / {final_diag.get('quote_enrich_ok', 0) + final_diag.get('quote_enrich_fail', 0)}")
-        d4.metric("運算耗時", f"{final_diag['t_filter']:.3f}秒 / {final_diag['t_backtest']:.2f}秒")
-        st.caption(
-            f"耗時分布：股票清單 {final_diag['t_meta']:.2f}秒 ｜ 最新資料 {final_diag['t_rank']:.2f}秒 ｜ 過去表現 {final_diag['t_features']:.2f}秒 ｜ 排隊資訊 {final_diag['t_enrich']:.2f}秒 ｜ 總共 {final_diag['total']:.2f}秒"
-        )
-        st.caption(
-            f"下載過去資料分段成功 {final_diag.get('yf_parts_ok', 0)} ｜ 失敗 {final_diag.get('yf_parts_fail', 0)} ｜ 處理失敗 {final_diag.get('feature_fail', 0)} ｜ 其他錯誤 {final_diag.get('other_err', 0)}"
-        )
-        if final_diag.get("last_errors"):
-            render_error_panel(list(final_diag["last_errors"]))
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
