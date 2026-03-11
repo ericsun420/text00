@@ -1578,6 +1578,7 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
                 item["同族群跟漲數"] = peer_rise_n
                 item["族群共振分數"] = 3.4 if peer_rise_n >=4 else 2.7 if peer_rise_n==3 else 1.8 if peer_rise_n==2 else 0.8 if peer_rise_n==1 else 0.0
         item["入選理由"] = build_reason_tags(item)
+        item.update(build_position_advice(item))
 
     return {
         "ok": True,
@@ -2103,6 +2104,162 @@ def render_backtest_table(display_df: pd.DataFrame):
     st.markdown(table_html, unsafe_allow_html=True)
 
 
+
+def build_position_advice(item):
+    signal = safe_float(item.get("今日表現分數", 0.0), 0.0)
+    radar = safe_float(item.get("起漲雷達分數", 0.0), 0.0)
+    heat = safe_float(item.get("交易熱度", 0.0), 0.0)
+    dist = safe_float(item.get("距離最高價%", 99.0), 99.0)
+    close_pos = safe_float(item.get("close_pos", 0.0), 0.0)
+    pullback = safe_float(item.get("pullback", 0.0), 0.0)
+    risk = safe_int(item.get("風險數", 0), 0)
+    peer_rising = safe_int(item.get("同族群跟漲數", 0), 0)
+    ret5 = safe_float(item.get("近5天表現%", 0.0), 0.0)
+    ret20 = safe_float(item.get("近20天表現%", 0.0), 0.0)
+    breakout = safe_float(item.get("突破區間分數", 0.0), 0.0)
+
+    buy = 0.0
+    hold = 0.0
+    sell = 0.0
+    buy_reasons, hold_reasons, sell_reasons = [], [], []
+
+    if breakout >= 1.0 or radar >= 4.0:
+        buy += 1.5
+        buy_reasons.append("整理後突破")
+    elif radar >= 3.0:
+        buy += 0.8
+        buy_reasons.append("準發動型態")
+
+    if heat >= 1.25:
+        buy += 1.2
+        hold += 0.8
+        buy_reasons.append("量能持續放大")
+        hold_reasons.append("熱度仍在")
+    elif heat >= 1.0:
+        buy += 0.6
+        hold += 0.6
+        buy_reasons.append("量能沒有掉")
+    elif heat < 0.6:
+        sell += 1.0
+        hold -= 0.6
+        sell_reasons.append("熱度明顯降溫")
+
+    if dist <= 2.5:
+        buy += 1.0
+        hold += 0.8
+        buy_reasons.append("仍貼近日高")
+        hold_reasons.append("位置仍偏強")
+    elif dist <= 5.0:
+        hold += 0.6
+    elif dist >= 8.0:
+        sell += 1.0
+        hold -= 0.7
+        sell_reasons.append("已明顯離開高點")
+
+    if close_pos >= 0.84:
+        buy += 0.9
+        hold += 0.8
+        buy_reasons.append("收在高檔")
+    elif close_pos >= 0.70:
+        hold += 0.6
+    elif close_pos < 0.55:
+        sell += 1.2
+        hold -= 0.8
+        sell_reasons.append("收盤位置偏弱")
+
+    if peer_rising >= 2:
+        buy += 0.8
+        hold += 0.8
+        buy_reasons.append(f"同族群跟漲 {peer_rising} 檔")
+        hold_reasons.append("族群仍有共振")
+    elif peer_rising == 1:
+        hold += 0.3
+        hold_reasons.append("至少有同族群跟動")
+    else:
+        sell += 0.4
+        sell_reasons.append("族群暫未同步")
+
+    if signal >= 6.2:
+        buy += 0.9
+        hold += 1.1
+        hold_reasons.append("整體結構仍強")
+    elif signal >= 5.0:
+        hold += 0.9
+        hold_reasons.append("結構還沒壞")
+    elif signal < 3.8:
+        sell += 0.8
+        sell_reasons.append("整體分數偏弱")
+
+    if ret20 > 0 and ret5 > 0:
+        hold += 0.8
+        buy += 0.3
+        hold_reasons.append("中短線趨勢仍正")
+    elif ret5 < 0 and ret20 < 0:
+        sell += 0.8
+        sell_reasons.append("中短線同步轉弱")
+
+    if risk <= 1:
+        buy += 0.5
+        hold += 0.7
+    elif risk <= 3:
+        hold += 0.4
+    elif risk >= 5:
+        sell += 1.4
+        hold -= 1.0
+        buy -= 1.0
+        sell_reasons.append("風險訊號累積過多")
+    elif risk >= 4:
+        sell += 0.8
+        sell_reasons.append("風險偏高")
+
+    if pullback <= 0.008:
+        buy += 0.5
+        hold += 0.4
+    elif pullback >= 0.02:
+        sell += 1.0
+        hold -= 0.7
+        sell_reasons.append("從高點回落偏大")
+
+    scores = {"持續買入": round(buy, 2), "續抱": round(hold, 2), "賣出": round(sell, 2)}
+    if scores["賣出"] >= 4.2 and scores["賣出"] >= scores["續抱"] + 0.8 and scores["賣出"] >= scores["持續買入"] + 1.0:
+        action = "賣出"
+        reasons = sell_reasons
+    elif scores["持續買入"] >= 4.6 and scores["持續買入"] >= scores["續抱"] + 0.6 and risk <= 3:
+        action = "持續買入"
+        reasons = buy_reasons
+    else:
+        action = "續抱"
+        reasons = hold_reasons if hold_reasons else buy_reasons
+
+    ordered = sorted(scores.values(), reverse=True)
+    top = ordered[0] if ordered else 0.0
+    second = ordered[1] if len(ordered) > 1 else 0.0
+    gap = top - second
+    if top >= 5.0 and gap >= 1.0:
+        confidence = "高"
+    elif top >= 4.0 and gap >= 0.45:
+        confidence = "中"
+    else:
+        confidence = "低"
+
+    reason_text = "｜".join(list(dict.fromkeys(reasons))[:4]) if reasons else "先看原本分數與位置"
+    if action == "持續買入":
+        summary = "偏向持續買入：結構還在走強，可考慮分批加碼。"
+    elif action == "續抱":
+        summary = "偏向續抱：結構尚未轉壞，先抱著觀察即可。"
+    else:
+        summary = "偏向賣出：風險訊號變多，適合偏保守處理。"
+
+    return {
+        "動作建議": action,
+        "建議信心": confidence,
+        "建議理由": reason_text,
+        "建議摘要": summary,
+        "加碼分": scores["持續買入"],
+        "續抱分": scores["續抱"],
+        "賣出分": scores["賣出"],
+    }
+
 def build_reason_tags(row):
     tags = []
     breakout = safe_float(row.get("突破區間分數", 0.0), 0.0)
@@ -2195,6 +2352,9 @@ def render_search_result_box(search_result):
         f"<div class='card-status'>{html.escape(str(item.get('狀態', '')))}</div>",
         f"<div class='card-predict'>{html.escape(str(item.get('預測主句', '白話預測：暫時沒有足夠資料')))}</div>",
         f"<div class='card-predict-note'>{html.escape(str(item.get('預測副句', '先以原本分數與熱度為主')))}</div>",
+        f"<div class='card-predict' style='margin-top:10px;'>建議：{html.escape(str(item.get('動作建議', '續抱')))}｜信心：{html.escape(str(item.get('建議信心', '中')))}</div>",
+        f"<div class='card-predict-note'>{html.escape(str(item.get('建議摘要', '先看原本分數與位置')))}</div>",
+        f"<div class='soft-note'>建議理由：{html.escape(str(item.get('建議理由', '先看原本分數與位置')))}</div>",
         f"<div class='soft-note'>入選理由：{html.escape(str(item.get('入選理由', '先看分數與位置')))}</div>",
         "<div class='card-stars-wrap'>",
         f"<div class='card-stars'>{html.escape(str(item.get('推薦指數', '')))}</div>",
@@ -2208,6 +2368,9 @@ def render_search_result_box(search_result):
         f"<div class='stat-pill'><div class='stat-k'>所屬產業</div><div class='stat-v'>{html.escape(str(item.get('產業', '其他')))}</div></div>",
         f"<div class='stat-pill'><div class='stat-k'>族群熱度</div><div class='stat-v'>{html.escape(str(item.get('族群狀態', '單兵觀察')))}</div></div>",
         f"<div class='stat-pill'><div class='stat-k'>族群共振分數</div><div class='stat-v'>{safe_float(item.get('族群共振分數', 0.0), 0.0):.2f}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>加碼分</div><div class='stat-v'>{safe_float(item.get('加碼分', 0.0), 0.0):.2f}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>續抱分</div><div class='stat-v'>{safe_float(item.get('續抱分', 0.0), 0.0):.2f}</div></div>",
+        f"<div class='stat-pill'><div class='stat-k'>賣出分</div><div class='stat-v'>{safe_float(item.get('賣出分', 0.0), 0.0):.2f}</div></div>",
         f"<div class='stat-pill'><div class='stat-k'>近 5 天</div><div class='stat-v'>{safe_float(item.get('近5天表現%', 0.0), 0.0):+.2f}%</div></div>",
         f"<div class='stat-pill'><div class='stat-k'>近 20 天</div><div class='stat-v'>{safe_float(item.get('近20天表現%', 0.0), 0.0):+.2f}%</div></div>",
         "</div>",
