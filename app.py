@@ -1593,7 +1593,7 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
 
 def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
     diag = copy_diag(base_diag)
-    stats = {"候選總數": 0, "買賣不夠熱絡": [], "從高點掉下來太多": [], "目前價格相對弱勢": [], "過去沒有連續大漲紀錄": [], "資訊不足": [], "未達基本熱門門檻": [], "市場不符": []}
+    stats = {"候選總數": 0}
     if raw_df is None or raw_df.empty:
         return pd.DataFrame(), stats, diag
 
@@ -1636,11 +1636,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             min_board=min_board,
         )
         if not assessment.get("passed"):
-            reason_key = assessment.get("reason_key", "資訊不足")
-            if reason_key not in stats:
-                stats[reason_key] = []
-            stats[reason_key].append(f"{r['code']} {r['name']}")
-            if reason_key == "資訊不足":
+            if assessment.get("reason_key") == "資訊不足":
                 diag["yf_fail"] += 1
             continue
         item = assessment.get("item")
@@ -1671,20 +1667,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             item["族群狀態"] = cluster_status
             item["族群共振分數"] = cluster_score
 
-            # 順手把風險映射到統計區，方便看哪一類偏多，但不淘汰
-            flag_text = str(item.get("風險標記", ""))
-            if "熱度不足" in flag_text:
-                stats["買賣不夠熱絡"].append(f"{r['code']} {r['name']}")
-            if "回落偏大" in flag_text:
-                stats["從高點掉下來太多"].append(f"{r['code']} {r['name']}")
-            if "收在偏低" in flag_text:
-                stats["目前價格相對弱勢"].append(f"{r['code']} {r['name']}")
-            if "血統偏弱" in flag_text:
-                stats["過去沒有連續大漲紀錄"].append(f"{r['code']} {r['name']}")
-            if "歷史不足" in flag_text:
-                stats["資訊不足"].append(f"{r['code']} {r['name']}")
-            if "離高點偏遠" in flag_text or "成交量偏低" in flag_text:
-                stats["未達基本熱門門檻"].append(f"{r['code']} {r['name']}")
             out.append(item)
 
     res = pd.DataFrame(out)
@@ -1860,26 +1842,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         ] = ["排除", "排除"]
     else:
         res = pd.DataFrame(columns=["分級", "模式分級"])
-
-    # 最終同步：避免同一檔股票同時出現在 A/B/C 推薦與「未達門檻/風險統計」
-    final_codes = set()
-    if not res.empty and "模式分級" in res.columns and "代號" in res.columns:
-        final_codes = set(
-            res.loc[res["模式分級"].isin(["A級焦點", "B級觀察", "C級候補"]), "代號"].astype(str)
-        )
-
-    for k, v in list(stats.items()):
-        if isinstance(v, list):
-            cleaned = []
-            seen = set()
-            for item in v:
-                code = str(item).split()[0] if str(item).strip() else ""
-                if code and code in final_codes:
-                    continue
-                if item not in seen:
-                    seen.add(item)
-                    cleaned.append(item)
-            stats[k] = cleaned
 
     diag["final_count"] = len(res)
     return res, stats, diag
@@ -2834,12 +2796,6 @@ if "raw_data_vault_v12" in st.session_state:
         )
         if final_diag.get("last_errors"):
             render_error_panel(list(final_diag["last_errors"]))
-
-    with st.expander("🎯 未符合條件的股票名單", expanded=True):
-        for reason, items in stats.items():
-            if isinstance(items, list) and items:
-                st.markdown(f"**{reason}**")
-                st.markdown('<div class="fail-bag">' + ''.join([f'<span class="fail-tag">{x}</span>' for x in items]) + '</div>', unsafe_allow_html=True)
 
     st.markdown("<hr>", unsafe_allow_html=True)
 
