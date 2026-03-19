@@ -1787,18 +1787,18 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
                 res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底(嚴選)"]
 
         c_candidates = res[(res["分級"] == "C級候補") | (res["分級"] == "排除")].copy()
-        if is_test:
-            c_candidates = c_candidates[
-                (c_candidates["起漲雷達分數"] >= 1.8) &
-                (c_candidates["漲幅%"] >= 0.1) &
-                (c_candidates["交易熱度"] >= 0.72)
-            ]
-        else:
-            c_candidates = c_candidates[
-                (c_candidates["起漲雷達分數"] >= 1.7) &
-                (c_candidates["漲幅%"] >= 0.0) &
-                (candidates["交易熱度"] >= 0.70)
-            ]
+       if is_test:
+    c_candidates = c_candidates[
+        (c_candidates["起漲雷達分數"] >= 1.8) &
+        (c_candidates["漲幅%"] >= 0.1) &
+        (c_candidates["交易熱度"] >= 0.72)
+    ]
+else:
+    c_candidates = c_candidates[
+        (c_candidates["起漲雷達分數"] >= 1.7) &
+        (c_candidates["漲幅%"] >= 0.0) &
+        (c_candidates["交易熱度"] >= 0.70)
+    ]
 
         c_keep_idx = (
             c_candidates.sort_values(
