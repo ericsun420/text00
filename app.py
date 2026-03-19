@@ -279,6 +279,7 @@ def copy_diag(diag):
         d["last_errors"] = deque(d.get("last_errors", []), maxlen=12)
     return d
 
+
 def normalize_industry(raw: str) -> str:
     s = str(raw or "").strip()
     if not s or s.lower() == "nan":
@@ -394,6 +395,8 @@ def refine_industry(code: str, name: str, industry: str) -> str:
             return label
 
     return industry
+
+
 def get_api_key():
     key = ""
     try:
@@ -810,6 +813,7 @@ def compute_feature_cache(candidate_df, meta_dict, diag, status_placeholder, per
                 "ret10": ret10,
                 "ret20": ret20,
                 "range20_pct": range20_pct,
+                "vol_ma5": vol_ma5,
             }
             diag["feature_ok"] += 1
         except Exception as e:
@@ -1032,7 +1036,6 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     if only_tse and market != "上市":
         return {"passed": False, "reason_key": "市場不符", "reason_text": "目前設定只看上市", "item": None}
 
-    # 歷史資料不足時不要整支淘汰，先用保守預設值降級處理
     hist_missing = feat is None
     feat = feat or {}
     vol_ma20 = safe_float(feat.get("vol_ma20"), 0.0)
@@ -1044,7 +1047,6 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     range20_pct = safe_float(feat.get("range20_pct"), 0.0)
     vol_ma5 = safe_float(feat.get("vol_ma5"), 0.0)
 
-    # 沒有均量時，用今天成交量做保守基準，避免 vol_ratio 爆掉或直接淘汰
     if vol_ma20 <= 0:
         vol_ma20 = max(safe_float(r.get("vol_sh", 0), 0.0), 1.0)
         hist_missing = True
@@ -1067,8 +1069,6 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     score += min(3.2, max(0.0, 3.2 - r["dist"] * 0.85))
     score += min(3.0, max(0.0, vol_ratio_live - 0.85))
     score += 1.1 if close_pos >= 0.92 else 0.6 if close_pos >= 0.78 else 0.2 if close_pos >= 0.62 else 0.0
-    # 連續大漲血統不要在開關關閉時仍然偷偷大量影響主分數
-    # 基礎只保留很輕的「曾經有動能」痕跡，真正明顯的血統效果交給 use_bloodline 開關
     score += min(0.22, board_streak * 0.10)
     score += 0.9 if proximity_52w >= 95 else 0.5 if proximity_52w >= 88 else 0.0
     score += 0.35 if ret5 > 0 else 0.0
@@ -1109,7 +1109,6 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
 
     bloodline_note = ""
     if use_bloodline:
-        # 開啟時要真的有感：有血統明顯加分，沒血統也真的會被扣
         if board_streak >= max(2, min_board + 1):
             score += 1.35
             bloodline_note = "｜血統強"
@@ -1123,12 +1122,10 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
             risk_count += 1
             bloodline_note = "｜新起漲"
     else:
-        # 關掉血統時，對首根型稍微友善一點，避免開關切了名單還是完全一樣
         if board_streak == 0:
             score += 0.22
 
     if is_test:
-        # 放寬模式要真的看得出差異，不只是輕微 +0.4
         score += 0.85
         risk_count = max(0, risk_count - 2)
         if len(risk_flags) >= 2:
@@ -1167,13 +1164,11 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
     if ret20 > 0 or ret5 > 0:
         breakout_score += 0.45
 
-    # 整理後剛突破：近 20 天震幅不大、20 天漲幅不誇張、但近 5~10 天開始抬頭
     if 0 < ret20 <= 12 and ret5 >= 1.2 and range20_pct <= 18:
         breakout_score += 1.15
     elif -3 <= ret20 <= 8 and ret10 >= 2.0 and range20_pct <= 14:
         breakout_score += 0.85
 
-    # 最近 5 天均量比 20 天均量明顯抬升，代表剛開始被注意到
     if vol_ma20 > 0 and vol_ma5 / max(vol_ma20, 1e-9) >= 1.25:
         breakout_score += 0.65
     elif vol_ma20 > 0 and vol_ma5 / max(vol_ma20, 1e-9) >= 1.10:
@@ -1187,7 +1182,6 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         else:
             breakout_score -= 0.30 if not is_test else 0.12
     else:
-        # 關掉血統時，稍微偏愛首根型
         if board_streak == 0:
             breakout_score += 0.45
         elif board_streak >= 2:
@@ -1248,7 +1242,6 @@ def evaluate_candidate_record(r, feat, now_ts, is_test, use_bloodline, only_tse,
         "保底補位": "",
     }
 
-    # 只保留極少數硬淘汰：市場不符已在前面處理，這裡基本都進榜
     return {"passed": True, "reason_key": "通過", "reason_text": item["風險標記"], "item": item}
 
 
@@ -1548,7 +1541,6 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
         pred = estimate_continuation_from_history(hist_df, assessment["item"])
         assessment["item"].update(pred)
         item = assessment["item"]
-        # 獨立搜尋也補上簡易族群資訊與入選理由，避免卡片資訊不完整
         if vault and isinstance(vault, dict):
             cdf = vault.get("candidate_df")
             if cdf is not None and not getattr(cdf, "empty", False) and "industry" in cdf.columns:
@@ -1591,7 +1583,6 @@ def evaluate_single_search(query, meta_dict, api_key, now_ts, is_test, use_blood
     }
 
 
-
 def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline, only_tse, min_board, base_diag):
     diag = copy_diag(base_diag)
     stats = {"候選總數": 0}
@@ -1607,7 +1598,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         diag["final_count"] = 0
         return pd.DataFrame(), stats, diag
 
-    # 先用候選池計算「同族群一起轉強」數，後面直接吃進主評分與分級
     industry_col = work["industry"].fillna("其他").replace("", "其他") if "industry" in work.columns else pd.Series(["其他"] * len(work), index=work.index)
     industry_counts = industry_col.value_counts()
     high_s = work.get("high", pd.Series([0] * len(work), index=work.index)).astype(float)
@@ -1672,7 +1662,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     res = pd.DataFrame(out)
     if not res.empty:
-        # 模式排序分：讓兩個開關真的會改變排序與入選名單，而不只是顯示文案不同
         if "風險數" not in res.columns:
             res["風險數"] = 0
         if "起漲雷達分數" not in res.columns:
@@ -1754,7 +1743,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             ):
                 return "B級觀察"
 
-            # C 級要像真正候補，不要太像小 B 級；放寬模式下再稍微鬆一點
             if is_test:
                 c_radar_min, c_heat_min, c_dist_max, c_chg_min = 1.8, 0.72, 7.4, 0.1
             else:
@@ -1767,7 +1755,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
         res["分級"] = res.apply(_tier, axis=1)
         res["模式分級"] = res["分級"]
 
-        # A 保底弱化：只有最高分真的夠強時才補，不強求一定要有 A
         if (res["分級"] == "A級焦點").sum() == 0 and len(res) >= 1:
             top_pick = res.sort_values(["今日表現分數", "起漲雷達分數"], ascending=[False, False]).head(1).copy()
             if not top_pick.empty:
@@ -1799,7 +1786,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             if len(reserve_idx) > 0:
                 res.loc[reserve_idx, ["分級", "模式分級", "保底補位"]] = ["B級觀察", "B級觀察", "B保底(嚴選)"]
 
-        # C 不是垃圾桶：只留真正還有起漲味道的前 8 檔，但如果完全沒有，補少量 C 保底
         c_candidates = res[(res["分級"] == "C級候補") | (res["分級"] == "排除")].copy()
         if is_test:
             c_candidates = c_candidates[
@@ -1811,7 +1797,7 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
             c_candidates = c_candidates[
                 (c_candidates["起漲雷達分數"] >= 1.7) &
                 (c_candidates["漲幅%"] >= 0.0) &
-                (c_candidates["交易熱度"] >= 0.70)
+                (candidates["交易熱度"] >= 0.70)
             ]
 
         c_keep_idx = (
@@ -1846,7 +1832,6 @@ def apply_dynamic_filters(raw_df, feature_cache, now_ts, is_test, use_bloodline,
 
     diag["final_count"] = len(res)
     return res, stats, diag
-
 
 
 # ============================================================
@@ -1907,7 +1892,6 @@ def run_surrogate_backtest(raw_daily, universe_codes, meta_dict, lookback_days=1
             board_list[i] = streak
         df["board_streak"] = board_list
 
-        # 盡量貼近現在前台 B/C 邏輯：看模式排序感，而不是只看爆衝條件
         df["dist_pct"] = 0.0
         for i in range(1, len(df)):
             prev_close = safe_float(df["Close"].iloc[i-1], 0.0)
@@ -2063,7 +2047,7 @@ def render_backtest_table(display_df: pd.DataFrame):
 
     body_rows = []
     for _, row in display_df.iterrows():
-        ret = float(row["獲利報酬%"] ) if pd.notna(row["獲利報酬%"] ) else 0.0
+        ret = float(row["獲利報酬%"]) if pd.notna(row["獲利報酬%"]) else 0.0
         if ret >= 6:
             ret_class = "ret-strong"
         elif ret > 0:
@@ -2102,7 +2086,6 @@ def render_backtest_table(display_df: pd.DataFrame):
     </div>
     """
     st.markdown(table_html, unsafe_allow_html=True)
-
 
 
 def build_position_advice(item):
@@ -2260,6 +2243,7 @@ def build_position_advice(item):
         "賣出分": scores["賣出"],
     }
 
+
 def build_reason_tags(row):
     tags = []
     breakout = safe_float(row.get("突破區間分數", 0.0), 0.0)
@@ -2300,6 +2284,7 @@ def build_reason_tags(row):
     if row.get("保底補位", ""):
         tags.append(str(row.get("保底補位")))
     return "｜".join(tags[:4]) if tags else "先看分數與位置"
+
 
 def render_search_result_box(search_result):
     if not search_result:
@@ -2379,6 +2364,7 @@ def render_search_result_box(search_result):
     ]
     st.markdown(''.join(parts), unsafe_allow_html=True)
 
+
 def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
     if section_df is None or section_df.empty:
         st.info(empty_text)
@@ -2419,6 +2405,7 @@ def render_stock_cards(section_df: pd.DataFrame, empty_text: str):
 """,
                 unsafe_allow_html=True,
             )
+
 
 # ============================================================
 # UI 介面
@@ -2755,25 +2742,39 @@ with api_col:
         st.warning("⚠️ 尚未偵測到 Fugle API Key，將無法抓取最新官方資料。")
 st.markdown('</div>', unsafe_allow_html=True)
 
+# ============================================================
+# 獨立搜尋（修正：切換搜尋不用點兩次、按 Enter 可直接搜尋）
+# ============================================================
 st.markdown('<div class="glass-row">', unsafe_allow_html=True)
-search_col, search_btn_col = st.columns([3.6, 1.2])
-with search_col:
-    search_query = st.text_input(
-        "獨立搜尋",
-        value=st.session_state.get("independent_search_query", ""),
-        placeholder="輸入股票代號或名稱，例如 8299、群聯、華邦電",
-        help="不受清單限制，直接指定一支股票來算算看它的分數。",
-        label_visibility="collapsed",
-    )
-with search_btn_col:
-    search_launch = st.button("🔎 搜尋個股評分", use_container_width=True)
+with st.form("independent_search_form", clear_on_submit=False):
+    search_col, search_btn_col = st.columns([3.6, 1.2])
+
+    with search_col:
+        st.text_input(
+            "獨立搜尋",
+            key="independent_search_query",
+            placeholder="輸入股票代號或名稱，例如 8299、群聯、華邦電",
+            help="不受清單限制，直接指定一支股票來算算看它的分數。",
+            label_visibility="collapsed",
+        )
+
+    with search_btn_col:
+        search_launch = st.form_submit_button("🔎 搜尋個股評分", use_container_width=True)
 st.markdown('</div>', unsafe_allow_html=True)
 
 if search_launch:
-    st.session_state["independent_search_query"] = search_query
+    query = str(st.session_state.get("independent_search_query", "")).strip()
     api_key_search = get_api_key()
     meta_search, meta_errors = get_stock_list()
-    if not api_key_search:
+
+    if not query:
+        st.session_state["independent_search_result"] = {
+            "ok": False,
+            "kind": "not_found",
+            "message": "請先輸入股票代號或名稱。",
+            "matches": [],
+        }
+    elif not api_key_search:
         st.session_state["independent_search_result"] = {
             "ok": False,
             "kind": "not_found",
@@ -2791,7 +2792,7 @@ if search_launch:
         try:
             with st.status("🔎 搜尋指定股票並套用同一套評分模型...", expanded=False):
                 st.session_state["independent_search_result"] = evaluate_single_search(
-                    query=search_query,
+                    query=query,
                     meta_dict=meta_search,
                     api_key=api_key_search,
                     now_ts=now_taipei(),
@@ -2900,7 +2901,7 @@ if "raw_data_vault_v12" in st.session_state:
     res, stats, final_diag = apply_dynamic_filters(
         raw_df=vault["candidate_df"],
         feature_cache=vault["feature_cache"],
-        now_ts=vault["ts"],
+        now_ts=now_taipei(),
         is_test=is_test,
         use_bloodline=use_bloodline,
         only_tse=only_tse,
@@ -2945,7 +2946,6 @@ if "raw_data_vault_v12" in st.session_state:
     m3.metric("歷史資料庫完整度", coverage, f"成功下載過去資料數：{final_diag.get('yf_returned', 0)}")
     m4.metric("歷史模擬勝率", f"{bt_stats['win_rate']}%", f"過去出現過的機會：{bt_stats['signals']} 次")
 
-
     st.markdown("<hr>", unsafe_allow_html=True)
 
     if not res.empty and "模式分級" not in res.columns:
@@ -2959,7 +2959,6 @@ if "raw_data_vault_v12" in st.session_state:
             res["入選理由"] = res.apply(build_reason_tags, axis=1)
         else:
             res["入選理由"] = res.apply(build_reason_tags, axis=1)
-        # 族群共振在這一版正式吃進主評分後，再依新分數重排一次
         if "模式排序分" in res.columns:
             res = res.sort_values(
                 ["模式分級", "模式排序分", "今日表現分數", "起漲雷達分數"],
